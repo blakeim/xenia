@@ -32,6 +32,7 @@ enum RoundMode {
   ROUND_TO_NEAREST,
   ROUND_TO_MINUS_INFINITY,
   ROUND_TO_POSITIVE_INFINITY,
+  ROUND_DYNAMIC,  // Round based on the host's rounding mode.
 };
 
 enum LoadStoreFlags {
@@ -76,7 +77,7 @@ enum PackType : uint16_t {
   // Special types:
   PACK_TYPE_D3DCOLOR = 0,
   PACK_TYPE_FLOAT16_2 = 1,
-  PACK_TYPE_FLOAT16_3 = 2,  // FIXME: Not verified, but looks correct.
+  PACK_TYPE_SHORT_4 = 2,
   PACK_TYPE_FLOAT16_4 = 3,
   PACK_TYPE_SHORT_2 = 4,
   PACK_TYPE_UINT_2101010 = 5,
@@ -86,8 +87,7 @@ enum PackType : uint16_t {
   PACK_TYPE_16_IN_32 = 7,
 
   PACK_TYPE_MODE = 0x000F,  // just to get the mode
-
-  // Unpack to low or high parts.
+                            // Unpack to low or high parts.
   PACK_TYPE_TO_LO = 0 << 12,
   PACK_TYPE_TO_HI = 1 << 12,
 
@@ -224,6 +224,7 @@ enum Opcode {
   OPCODE_UNPACK,
   OPCODE_ATOMIC_EXCHANGE,
   OPCODE_ATOMIC_COMPARE_EXCHANGE,
+  OPCODE_SET_ROUNDING_MODE,
   __OPCODE_MAX_VALUE,  // Keep at end.
 };
 

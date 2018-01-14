@@ -12,12 +12,15 @@
 
 #include <functional>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "xenia/ui/ui_event.h"
 
 namespace xe {
 namespace ui {
+
+class Window;
 
 class MenuItem {
  public:
@@ -50,6 +53,9 @@ class MenuItem {
   void AddChild(MenuItemPtr child_item);
   void RemoveChild(MenuItem* child_item);
   MenuItem* child(size_t index);
+
+  virtual void EnableMenuItem(Window& window) = 0;
+  virtual void DisableMenuItem(Window& window) = 0;
 
  protected:
   MenuItem(Type type, const std::wstring& text, const std::wstring& hotkey,

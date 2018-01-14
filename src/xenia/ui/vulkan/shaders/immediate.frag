@@ -5,11 +5,13 @@
 precision highp float;
 
 layout(push_constant) uniform PushConstants {
-  mat4 projection_matrix;
-  int restrict_texture_samples;
+  layout(offset = 64) int restrict_texture_samples;
 } push_constants;
 
 layout(set = 0, binding = 0) uniform sampler2D texture_sampler;
+
+layout(set = 0, binding = 1) uniform sampler1D tex1D;
+layout(set = 0, binding = 1) uniform sampler2D tex2D;
 
 layout(location = 0) in vec2 vtx_uv;
 layout(location = 1) in vec4 vtx_color;

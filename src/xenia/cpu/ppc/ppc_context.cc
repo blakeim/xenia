@@ -22,12 +22,19 @@ namespace ppc {
 uint64_t PPCContext::cr() const {
   uint64_t final_bits = 0;
   for (int i = 0; i < 8; ++i) {
-    uint32_t crf = *(&cr0.value + i);
-    uint64_t bits = (crf & 0x1) << (4 * (7 - i) + 3) |
-                    ((crf >> 8) & 0x1) << (4 * (7 - i) + 2) |
-                    ((crf >> 16) & 0x1) << (4 * (7 - i) + 1) |
-                    ((crf >> 24) & 0x1) << (4 * (7 - i) + 0);
-    final_bits |= bits << (i * 4);
+    union {
+      uint32_t value;
+      struct {
+        uint8_t lt;
+        uint8_t gt;
+        uint8_t eq;
+        uint8_t so;
+      };
+    } crf;
+    crf.value = *(&cr0.value + i);
+    uint64_t bits = (crf.lt & 0x1) << 3 | (crf.gt & 0x1) << 2 |
+                    (crf.eq & 0x1) << 1 | (crf.so & 0x1) << 0;
+    final_bits |= bits << ((7 - i) * 4);
   }
   return final_bits;
 }
@@ -147,11 +154,28 @@ bool PPCContext::CompareRegWithString(const char* name, const char* value,
     }
     return true;
   } else if (sscanf(name, "f%d", &n) == 1) {
-    double expected = string_util::from_string<double>(value);
-    // TODO(benvanik): epsilon
-    if (this->f[n] != expected) {
-      std::snprintf(out_value, out_value_size, "%f", this->f[n]);
-      return false;
+    if (std::strstr(value, "0x")) {
+      // Special case: Treat float as integer.
+      uint64_t expected = string_util::from_string<uint64_t>(value, true);
+
+      union {
+        double f;
+        uint64_t u;
+      } f2u;
+      f2u.f = this->f[n];
+
+      if (f2u.u != expected) {
+        std::snprintf(out_value, out_value_size, "%016" PRIX64, f2u.u);
+        return false;
+      }
+    } else {
+      double expected = string_util::from_string<double>(value);
+
+      // TODO(benvanik): epsilon
+      if (this->f[n] != expected) {
+        std::snprintf(out_value, out_value_size, "%f", this->f[n]);
+        return false;
+      }
     }
     return true;
   } else if (sscanf(name, "v%d", &n) == 1) {

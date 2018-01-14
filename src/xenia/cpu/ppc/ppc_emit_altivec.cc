@@ -13,6 +13,8 @@
 #include "xenia/cpu/ppc/ppc_context.h"
 #include "xenia/cpu/ppc/ppc_hir_builder.h"
 
+#include <cmath>
+
 namespace xe {
 namespace cpu {
 namespace ppc {
@@ -244,6 +246,10 @@ int InstrEmit_lvrx_(PPCHIRBuilder& f, const InstrData& i, uint32_t vd,
   f.Branch(end_label);
   f.MarkLabel(load_label);
   // ea &= ~0xF
+  // NOTE: need to recalculate ea and eb because after Branch we start a new
+  // block and we can't use their previous instantiation in the new block
+  ea = CalculateEA_0(f, ra, rb);
+  eb = f.And(f.Truncate(ea, INT8_TYPE), f.LoadConstantInt8(0xF));
   ea = f.And(ea, f.LoadConstantUint64(~0xFull));
   // v = (new >> (16 - eb))
   Value* v = f.Permute(f.LoadVectorShl(eb), f.LoadZeroVec128(),
@@ -310,6 +316,10 @@ int InstrEmit_stvrx_(PPCHIRBuilder& f, const InstrData& i, uint32_t vd,
   auto skip_label = f.NewLabel();
   f.BranchFalse(eb, skip_label);
   // ea &= ~0xF
+  // NOTE: need to recalculate ea and eb because after Branch we start a new
+  // block and we can't use their previous instantiation in the new block
+  ea = CalculateEA_0(f, ra, rb);
+  eb = f.And(f.Truncate(ea, INT8_TYPE), f.LoadConstantInt8(0xF));
   ea = f.And(ea, f.LoadConstantUint64(~0xFull));
   // v = (old & ~mask) | ((new << eb) & mask)
   Value* new_value = f.Permute(f.LoadVectorShr(eb), f.LoadVR(vd),
@@ -2048,6 +2058,9 @@ int InstrEmit_vpkd3d128(PPCHIRBuilder& f, const InstrData& i) {
     case 3:  // VPACK_... 2 FLOAT16s DXGI_FORMAT_R16G16_FLOAT
       v = f.Pack(v, PACK_TYPE_FLOAT16_2);
       break;
+    case 4:  // VPACK_NORMSHORT4
+      v = f.Pack(v, PACK_TYPE_SHORT_4);
+      break;
     case 5:  // VPACK_... 4 FLOAT16s DXGI_FORMAT_R16G16B16A16_FLOAT
       v = f.Pack(v, PACK_TYPE_FLOAT16_4);
       break;
@@ -2060,7 +2073,7 @@ int InstrEmit_vpkd3d128(PPCHIRBuilder& f, const InstrData& i) {
   uint32_t control = kIdentityPermuteMask;  // original
   switch (pack) {
     case 1:  // VPACK_32
-      // VPACK_32 & shift = 3 puts lower 32 bits in x (leftmost slot).
+             // VPACK_32 & shift = 3 puts lower 32 bits in x (leftmost slot).
       switch (shift) {
         case 0:
           control = MakePermuteMask(0, 0, 0, 1, 0, 2, 1, 3);
@@ -2148,8 +2161,8 @@ int InstrEmit_vupkd3d128(PPCHIRBuilder& f, const InstrData& i) {
     case 3:  // VPACK_... 2 FLOAT16s DXGI_FORMAT_R16G16_FLOAT
       v = f.Unpack(v, PACK_TYPE_FLOAT16_2);
       break;
-    case 4:
-      v = f.Unpack(v, PACK_TYPE_FLOAT16_3);
+    case 4:  // VPACK_NORMSHORT4
+      v = f.Unpack(v, PACK_TYPE_SHORT_4);
       break;
     case 5:  // VPACK_... 4 FLOAT16s DXGI_FORMAT_R16G16B16A16_FLOAT
       v = f.Unpack(v, PACK_TYPE_FLOAT16_4);

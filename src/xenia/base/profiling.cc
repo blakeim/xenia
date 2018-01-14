@@ -241,7 +241,7 @@ void Profiler::Present() {
     return;
   }
   drawer_->Begin();
-  MicroProfileDraw(window_->width(), window_->height());
+  MicroProfileDraw(window_->scaled_width(), window_->scaled_height());
   drawer_->End();
 #endif  // XE_OPTION_PROFILING_UI
 }
@@ -268,6 +268,7 @@ void Profiler::ToggleDisplay() {}
 void Profiler::TogglePause() {}
 void Profiler::set_window(ui::Window* window) {}
 void Profiler::Present() {}
+void Profiler::Flip() {}
 
 #endif  // XE_OPTION_PROFILING
 

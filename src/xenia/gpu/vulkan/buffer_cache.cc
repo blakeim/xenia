@@ -27,19 +27,24 @@ constexpr VkDeviceSize kConstantRegisterUniformRange =
 
 BufferCache::BufferCache(RegisterFile* register_file, Memory* memory,
                          ui::vulkan::VulkanDevice* device, size_t capacity)
-    : register_file_(register_file), memory_(memory), device_(*device) {
+    : register_file_(register_file), memory_(memory), device_(device) {
   transient_buffer_ = std::make_unique<ui::vulkan::CircularBuffer>(
-      device,
+      device_,
       VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
           VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
       capacity);
+}
 
+BufferCache::~BufferCache() { Shutdown(); }
+
+VkResult BufferCache::Initialize() {
   VkMemoryRequirements pool_reqs;
   transient_buffer_->GetBufferMemoryRequirements(&pool_reqs);
-  gpu_memory_pool_ = device->AllocateMemory(pool_reqs);
+  gpu_memory_pool_ = device_->AllocateMemory(pool_reqs);
 
-  if (!transient_buffer_->Initialize(gpu_memory_pool_, 0)) {
-    assert_always();
+  VkResult status = transient_buffer_->Initialize(gpu_memory_pool_, 0);
+  if (status != VK_SUCCESS) {
+    return status;
   }
 
   // Descriptor pool used for all of our cached descriptors.
@@ -56,9 +61,11 @@ BufferCache::BufferCache(RegisterFile* register_file, Memory* memory,
   pool_sizes[0].descriptorCount = 2;
   descriptor_pool_info.poolSizeCount = 1;
   descriptor_pool_info.pPoolSizes = pool_sizes;
-  auto err = vkCreateDescriptorPool(device_, &descriptor_pool_info, nullptr,
-                                    &descriptor_pool_);
-  CheckResult(err, "vkCreateDescriptorPool");
+  status = vkCreateDescriptorPool(*device_, &descriptor_pool_info, nullptr,
+                                  &descriptor_pool_);
+  if (status != VK_SUCCESS) {
+    return status;
+  }
 
   // Create the descriptor set layout used for our uniform buffer.
   // As it is a static binding that uses dynamic offsets during draws we can
@@ -83,14 +90,17 @@ BufferCache::BufferCache(RegisterFile* register_file, Memory* memory,
   descriptor_set_layout_info.pNext = nullptr;
   descriptor_set_layout_info.flags = 0;
   VkDescriptorSetLayoutBinding uniform_bindings[] = {
-      vertex_uniform_binding, fragment_uniform_binding,
+      vertex_uniform_binding,
+      fragment_uniform_binding,
   };
   descriptor_set_layout_info.bindingCount =
       static_cast<uint32_t>(xe::countof(uniform_bindings));
   descriptor_set_layout_info.pBindings = uniform_bindings;
-  err = vkCreateDescriptorSetLayout(device_, &descriptor_set_layout_info,
-                                    nullptr, &descriptor_set_layout_);
-  CheckResult(err, "vkCreateDescriptorSetLayout");
+  status = vkCreateDescriptorSetLayout(*device_, &descriptor_set_layout_info,
+                                       nullptr, &descriptor_set_layout_);
+  if (status != VK_SUCCESS) {
+    return status;
+  }
 
   // Create the descriptor we'll use for the uniform buffer.
   // This is what we hand out to everyone (who then also needs to use our
@@ -101,15 +111,18 @@ BufferCache::BufferCache(RegisterFile* register_file, Memory* memory,
   set_alloc_info.descriptorPool = descriptor_pool_;
   set_alloc_info.descriptorSetCount = 1;
   set_alloc_info.pSetLayouts = &descriptor_set_layout_;
-  err = vkAllocateDescriptorSets(device_, &set_alloc_info,
-                                 &transient_descriptor_set_);
-  CheckResult(err, "vkAllocateDescriptorSets");
+  status = vkAllocateDescriptorSets(*device_, &set_alloc_info,
+                                    &transient_descriptor_set_);
+  if (status != VK_SUCCESS) {
+    return status;
+  }
 
   // Initialize descriptor set with our buffers.
   VkDescriptorBufferInfo buffer_info;
   buffer_info.buffer = transient_buffer_->gpu_buffer();
   buffer_info.offset = 0;
   buffer_info.range = kConstantRegisterUniformRange;
+
   VkWriteDescriptorSet descriptor_writes[2];
   auto& vertex_uniform_binding_write = descriptor_writes[0];
   vertex_uniform_binding_write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -131,22 +144,38 @@ BufferCache::BufferCache(RegisterFile* register_file, Memory* memory,
   fragment_uniform_binding_write.descriptorType =
       VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
   fragment_uniform_binding_write.pBufferInfo = &buffer_info;
-  vkUpdateDescriptorSets(device_, 2, descriptor_writes, 0, nullptr);
+  vkUpdateDescriptorSets(*device_, 2, descriptor_writes, 0, nullptr);
+
+  return VK_SUCCESS;
 }
 
-BufferCache::~BufferCache() {
-  vkFreeDescriptorSets(device_, descriptor_pool_, 1,
-                       &transient_descriptor_set_);
-  vkDestroyDescriptorSetLayout(device_, descriptor_set_layout_, nullptr);
-  vkDestroyDescriptorPool(device_, descriptor_pool_, nullptr);
+void BufferCache::Shutdown() {
+  if (transient_descriptor_set_) {
+    vkFreeDescriptorSets(*device_, descriptor_pool_, 1,
+                         &transient_descriptor_set_);
+    transient_descriptor_set_ = nullptr;
+  }
+
+  if (descriptor_set_layout_) {
+    vkDestroyDescriptorSetLayout(*device_, descriptor_set_layout_, nullptr);
+    descriptor_set_layout_ = nullptr;
+  }
+
+  if (descriptor_pool_) {
+    vkDestroyDescriptorPool(*device_, descriptor_pool_, nullptr);
+    descriptor_pool_ = nullptr;
+  }
+
   transient_buffer_->Shutdown();
 
   if (gpu_memory_pool_) {
-    vkFreeMemory(device_, gpu_memory_pool_, nullptr);
+    vkFreeMemory(*device_, gpu_memory_pool_, nullptr);
+    gpu_memory_pool_ = nullptr;
   }
 }
 
 std::pair<VkDeviceSize, VkDeviceSize> BufferCache::UploadConstantRegisters(
+    VkCommandBuffer command_buffer,
     const Shader::ConstantRegisterMap& vertex_constant_register_map,
     const Shader::ConstantRegisterMap& pixel_constant_register_map,
     VkFence fence) {
@@ -174,6 +203,24 @@ std::pair<VkDeviceSize, VkDeviceSize> BufferCache::UploadConstantRegisters(
   std::memcpy(dest_ptr, &values[XE_GPU_REG_SHADER_CONSTANT_LOOP_00].u32,
               32 * 4);
   dest_ptr += 32 * 4;
+
+  transient_buffer_->Flush(offset, kConstantRegisterUniformRange);
+
+  // Append a barrier to the command buffer.
+  VkBufferMemoryBarrier barrier = {
+      VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+      nullptr,
+      VK_ACCESS_HOST_WRITE_BIT,
+      VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_SHADER_READ_BIT,
+      VK_QUEUE_FAMILY_IGNORED,
+      VK_QUEUE_FAMILY_IGNORED,
+      transient_buffer_->gpu_buffer(),
+      offset,
+      kConstantRegisterUniformRange,
+  };
+  vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_HOST_BIT,
+                       VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 1,
+                       &barrier, 0, nullptr);
 
   return {offset, offset};
 
@@ -229,8 +276,8 @@ std::pair<VkDeviceSize, VkDeviceSize> BufferCache::UploadConstantRegisters(
 }
 
 std::pair<VkBuffer, VkDeviceSize> BufferCache::UploadIndexBuffer(
-    uint32_t source_addr, uint32_t source_length, IndexFormat format,
-    VkFence fence) {
+    VkCommandBuffer command_buffer, uint32_t source_addr,
+    uint32_t source_length, IndexFormat format, VkFence fence) {
   auto offset = FindCachedTransientData(source_addr, source_length);
   if (offset != VK_WHOLE_SIZE) {
     return {transient_buffer_->gpu_buffer(), offset};
@@ -258,13 +305,31 @@ std::pair<VkBuffer, VkDeviceSize> BufferCache::UploadIndexBuffer(
                                  source_ptr, source_length / 4);
   }
 
+  transient_buffer_->Flush(offset, source_length);
+
+  // Append a barrier to the command buffer.
+  VkBufferMemoryBarrier barrier = {
+      VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+      nullptr,
+      VK_ACCESS_HOST_WRITE_BIT,
+      VK_ACCESS_INDEX_READ_BIT,
+      VK_QUEUE_FAMILY_IGNORED,
+      VK_QUEUE_FAMILY_IGNORED,
+      transient_buffer_->gpu_buffer(),
+      offset,
+      source_length,
+  };
+  vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_HOST_BIT,
+                       VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, 0, nullptr, 1,
+                       &barrier, 0, nullptr);
+
   CacheTransientData(source_addr, source_length, offset);
   return {transient_buffer_->gpu_buffer(), offset};
 }
 
 std::pair<VkBuffer, VkDeviceSize> BufferCache::UploadVertexBuffer(
-    uint32_t source_addr, uint32_t source_length, Endian endian,
-    VkFence fence) {
+    VkCommandBuffer command_buffer, uint32_t source_addr,
+    uint32_t source_length, Endian endian, VkFence fence) {
   auto offset = FindCachedTransientData(source_addr, source_length);
   if (offset != VK_WHOLE_SIZE) {
     return {transient_buffer_->gpu_buffer(), offset};
@@ -291,6 +356,24 @@ std::pair<VkBuffer, VkDeviceSize> BufferCache::UploadVertexBuffer(
   } else {
     assert_always();
   }
+
+  transient_buffer_->Flush(offset, source_length);
+
+  // Append a barrier to the command buffer.
+  VkBufferMemoryBarrier barrier = {
+      VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+      nullptr,
+      VK_ACCESS_HOST_WRITE_BIT,
+      VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT,
+      VK_QUEUE_FAMILY_IGNORED,
+      VK_QUEUE_FAMILY_IGNORED,
+      transient_buffer_->gpu_buffer(),
+      offset,
+      source_length,
+  };
+  vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_HOST_BIT,
+                       VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, 0, nullptr, 1,
+                       &barrier, 0, nullptr);
 
   CacheTransientData(source_addr, source_length, offset);
   return {transient_buffer_->gpu_buffer(), offset};
@@ -360,13 +443,10 @@ void BufferCache::Flush(VkCommandBuffer command_buffer) {
   dirty_range.memory = transient_buffer_->gpu_memory();
   dirty_range.offset = 0;
   dirty_range.size = transient_buffer_->capacity();
-  vkFlushMappedMemoryRanges(device_, 1, &dirty_range);
+  vkFlushMappedMemoryRanges(*device_, 1, &dirty_range);
 }
 
-void BufferCache::InvalidateCache() {
-  // TODO(benvanik): caching.
-}
-
+void BufferCache::InvalidateCache() { transient_cache_.clear(); }
 void BufferCache::ClearCache() { transient_cache_.clear(); }
 
 void BufferCache::Scavenge() {

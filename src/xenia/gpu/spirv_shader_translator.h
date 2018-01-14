@@ -96,9 +96,10 @@ class SpirvShaderTranslator : public ShaderTranslator {
                          bool is_signed);
 
   // Creates a call to the given GLSL intrinsic.
-  spv::Id SpirvShaderTranslator::CreateGlslStd450InstructionCall(
-      spv::Decoration precision, spv::Id result_type,
-      spv::GLSLstd450 instruction_ordinal, std::vector<spv::Id> args);
+  spv::Id CreateGlslStd450InstructionCall(spv::Decoration precision,
+                                          spv::Id result_type,
+                                          spv::GLSLstd450 instruction_ordinal,
+                                          std::vector<spv::Id> args);
 
   // Loads an operand into a value.
   // The value returned will be in the form described in the operand (number of
@@ -136,8 +137,7 @@ class SpirvShaderTranslator : public ShaderTranslator {
   spv::Id vec2_float_type_ = 0, vec3_float_type_ = 0, vec4_float_type_ = 0;
   spv::Id vec4_int_type_ = 0, vec4_uint_type_ = 0;
   spv::Id vec2_bool_type_ = 0, vec3_bool_type_ = 0, vec4_bool_type_ = 0;
-  spv::Id image_1d_type_ = 0, image_2d_type_ = 0, image_3d_type_ = 0,
-          image_cube_type_ = 0;
+  spv::Id image_2d_type_ = 0, image_3d_type_ = 0, image_cube_type_ = 0;
 
   // Constants.
   spv::Id vec4_float_zero_ = 0, vec4_float_one_ = 0;
@@ -145,7 +145,9 @@ class SpirvShaderTranslator : public ShaderTranslator {
   // Array of AMD registers.
   // These values are all pointers.
   spv::Id registers_ptr_ = 0, registers_type_ = 0;
-  spv::Id consts_ = 0, a0_ = 0, aL_ = 0, p0_ = 0;
+  spv::Id consts_ = 0, a0_ = 0, p0_ = 0;
+  spv::Id aL_ = 0;           // Loop index stack - .x is active loop
+  spv::Id loop_count_ = 0;   // Loop counter stack
   spv::Id ps_ = 0, pv_ = 0;  // IDs of previous results
   spv::Id pc_ = 0;           // Program counter
   spv::Id pos_ = 0;
@@ -156,7 +158,7 @@ class SpirvShaderTranslator : public ShaderTranslator {
   spv::Id vertex_idx_ = 0;
   spv::Id frag_outputs_ = 0, frag_depth_ = 0;
   spv::Id samplers_ = 0;
-  spv::Id tex_[4] = {0};  // Images {1D, 2D, 3D, Cube}
+  spv::Id tex_[3] = {0};  // Images {2D, 3D, Cube}
 
   // SPIR-V IDs that are part of the in/out interface.
   std::vector<spv::Id> interface_ids_;

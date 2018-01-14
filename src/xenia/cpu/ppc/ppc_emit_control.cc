@@ -15,6 +15,8 @@
 #include "xenia/cpu/ppc/ppc_frontend.h"
 #include "xenia/cpu/ppc/ppc_hir_builder.h"
 
+#include <stddef.h>
+
 namespace xe {
 namespace cpu {
 namespace ppc {
@@ -141,7 +143,7 @@ int InstrEmit_branch(PPCHIRBuilder& f, const char* src, uint64_t cia,
 }
 
 return 0;
-}
+}  // namespace ppc
 
 int InstrEmit_bx(PPCHIRBuilder& f, const InstrData& i) {
   // if AA then
@@ -797,6 +799,6 @@ void RegisterEmitCategoryControl() {
   XEREGISTERINSTR(mtmsrd);
 }
 
-}  // namespace ppc
 }  // namespace cpu
+}  // namespace xe
 }  // namespace xe

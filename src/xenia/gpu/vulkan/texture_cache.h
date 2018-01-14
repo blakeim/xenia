@@ -24,6 +24,8 @@
 #include "xenia/ui/vulkan/vulkan.h"
 #include "xenia/ui/vulkan/vulkan_device.h"
 
+#include "third_party/vulkan/vk_mem_alloc.h"
+
 namespace xe {
 namespace gpu {
 namespace vulkan {
@@ -38,16 +40,12 @@ class TextureCache {
     TextureInfo texture_info;
     std::vector<std::unique_ptr<TextureView>> views;
 
-    // True if we know all info about this texture, false otherwise.
-    // (e.g. we resolve to system memory and may not know the full details about
-    // this texture)
-    bool is_full_texture;
     VkFormat format;
     VkImage image;
     VkImageLayout image_layout;
-    VkDeviceMemory image_memory;
-    VkDeviceSize memory_offset;
-    VkDeviceSize memory_size;
+    VmaAllocation alloc;
+    VmaAllocationInfo alloc_info;
+    VkFramebuffer framebuffer;  // Blit target frame buffer.
 
     uintptr_t access_watch_handle;
     bool pending_invalidation;
@@ -78,6 +76,9 @@ class TextureCache {
                TraceWriter* trace_writer, ui::vulkan::VulkanDevice* device);
   ~TextureCache();
 
+  VkResult Initialize();
+  void Shutdown();
+
   // Descriptor set layout containing all possible texture bindings.
   // The set contains one descriptor for each texture sampler [0-31].
   VkDescriptorSetLayout texture_descriptor_set_layout() const {
@@ -93,9 +94,9 @@ class TextureCache {
       const std::vector<Shader::TextureBinding>& vertex_bindings,
       const std::vector<Shader::TextureBinding>& pixel_bindings);
 
-  // TODO(benvanik): UploadTexture.
-  // TODO(benvanik): Resolve.
   // TODO(benvanik): ReadTexture.
+
+  Texture* Lookup(const TextureInfo& texture_info);
 
   // Looks for a texture either containing or matching these parameters.
   // Caller is responsible for checking if the texture returned is an exact
@@ -106,18 +107,11 @@ class TextureCache {
                          uint32_t height, TextureFormat format,
                          VkOffset2D* out_offset = nullptr);
 
+  TextureView* DemandView(Texture* texture, uint16_t swizzle);
+
   // Demands a texture for the purpose of resolving from EDRAM. This either
-  // creates a new texture or returns a previously created texture. texture_info
-  // is not required to be completely filled out, just guest_address and all
-  // sizes.
-  //
-  // It's possible that this may return an image that is larger than the
-  // requested size (e.g. resolving into a bigger texture) or an image that
-  // must have an offset applied. If so, the caller must handle this.
-  // At the very least, it's guaranteed that the image will be large enough to
-  // hold the requested size.
-  Texture* DemandResolveTexture(const TextureInfo& texture_info,
-                                TextureFormat format, VkOffset2D* out_offset);
+  // creates a new texture or returns a previously created texture.
+  Texture* DemandResolveTexture(const TextureInfo& texture_info);
 
   // Clears all cached content.
   void ClearCache();
@@ -135,7 +129,9 @@ class TextureCache {
   };
 
   // Allocates a new texture and memory to back it on the GPU.
-  Texture* AllocateTexture(const TextureInfo& texture_info);
+  Texture* AllocateTexture(const TextureInfo& texture_info,
+                           VkFormatFeatureFlags required_flags =
+                               VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
   bool FreeTexture(Texture* texture);
 
   // Demands a texture. If command_buffer is null and the texture hasn't been
@@ -143,28 +139,31 @@ class TextureCache {
   Texture* Demand(const TextureInfo& texture_info,
                   VkCommandBuffer command_buffer = nullptr,
                   VkFence completion_fence = nullptr);
-  TextureView* DemandView(Texture* texture, uint16_t swizzle);
   Sampler* Demand(const SamplerInfo& sampler_info);
 
   void FlushPendingCommands(VkCommandBuffer command_buffer,
                             VkFence completion_fence);
 
-  void ConvertTexture1D(uint8_t* dest, const TextureInfo& src);
-  void ConvertTexture2D(uint8_t* dest, const TextureInfo& src);
-  void ConvertTextureCube(uint8_t* dest, const TextureInfo& src);
+  static void ConvertTexelCTX1(uint8_t* dest, size_t dest_pitch,
+                               const uint8_t* src, Endian src_endianness);
+
+  bool ConvertTexture2D(uint8_t* dest, VkBufferImageCopy* copy_region,
+                        const TextureInfo& src);
+  bool ConvertTextureCube(uint8_t* dest, VkBufferImageCopy* copy_region,
+                          const TextureInfo& src);
+  bool ConvertTexture(uint8_t* dest, VkBufferImageCopy* copy_region,
+                      const TextureInfo& src);
+  bool ComputeTextureStorage(size_t* output_length, const TextureInfo& src);
+
+  // Writes a texture back into guest memory. This call is (mostly) asynchronous
+  // but the texture must not be flagged for destruction.
+  void WritebackTexture(Texture* texture);
 
   // Queues commands to upload a texture from system memory, applying any
   // conversions necessary. This may flush the command buffer to the GPU if we
   // run out of staging memory.
-  bool UploadTexture1D(VkCommandBuffer command_buffer, VkFence completion_fence,
-                       Texture* dest, const TextureInfo& src);
-
-  bool UploadTexture2D(VkCommandBuffer command_buffer, VkFence completion_fence,
-                       Texture* dest, const TextureInfo& src);
-
-  bool UploadTextureCube(VkCommandBuffer command_buffer,
-                         VkFence completion_fence, Texture* dest,
-                         const TextureInfo& src);
+  bool UploadTexture(VkCommandBuffer command_buffer, VkFence completion_fence,
+                     Texture* dest, const TextureInfo& src);
 
   void HashTextureBindings(XXH64_state_t* hash_state, uint32_t& fetch_mask,
                            const std::vector<Shader::TextureBinding>& bindings);
@@ -177,6 +176,9 @@ class TextureCache {
                            UpdateSetInfo* update_set_info,
                            const Shader::TextureBinding& binding);
 
+  // Removes invalidated textures from the cache, queues them for delete.
+  void RemoveInvalidatedTextures();
+
   Memory* memory_ = nullptr;
 
   RegisterFile* register_file_ = nullptr;
@@ -184,22 +186,22 @@ class TextureCache {
   ui::vulkan::VulkanDevice* device_ = nullptr;
   VkQueue device_queue_ = nullptr;
 
+  std::unique_ptr<xe::ui::vulkan::CommandBufferPool> wb_command_pool_ = nullptr;
   std::unique_ptr<xe::ui::vulkan::DescriptorPool> descriptor_pool_ = nullptr;
   std::unordered_map<uint64_t, VkDescriptorSet> texture_bindings_;
   VkDescriptorSetLayout texture_descriptor_set_layout_ = nullptr;
 
+  VmaAllocator mem_allocator_ = nullptr;
+
   ui::vulkan::CircularBuffer staging_buffer_;
+  ui::vulkan::CircularBuffer wb_staging_buffer_;
   std::unordered_map<uint64_t, Texture*> textures_;
   std::unordered_map<uint64_t, Sampler*> samplers_;
-  std::vector<Texture*> resolve_textures_;
   std::list<Texture*> pending_delete_textures_;
 
   std::mutex invalidated_textures_mutex_;
   std::vector<Texture*>* invalidated_textures_;
   std::vector<Texture*> invalidated_textures_sets_[2];
-
-  std::mutex invalidated_resolve_textures_mutex_;
-  std::vector<Texture*> invalidated_resolve_textures_;
 
   struct UpdateSetInfo {
     // Bitmap of all 32 fetch constants and whether they have been setup yet.

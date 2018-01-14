@@ -23,6 +23,8 @@
 #include "xenia/base/profiling.h"
 #include "xenia/base/string.h"
 #include "xenia/cpu/backend/code_cache.h"
+#include "xenia/cpu/backend/x64/x64_backend.h"
+#include "xenia/cpu/cpu_flags.h"
 #include "xenia/cpu/thread_state.h"
 #include "xenia/gpu/graphics_system.h"
 #include "xenia/hid/input_driver.h"
@@ -107,10 +109,26 @@ X_STATUS Emulator::Setup(
   // Shared export resolver used to attach and query for HLE exports.
   export_resolver_ = std::make_unique<xe::cpu::ExportResolver>();
 
+  std::unique_ptr<xe::cpu::backend::Backend> backend;
+  if (!backend) {
+#if defined(XENIA_HAS_X64_BACKEND) && XENIA_HAS_X64_BACKEND
+    if (FLAGS_cpu == "x64") {
+      backend.reset(new xe::cpu::backend::x64::X64Backend());
+    }
+#endif  // XENIA_HAS_X64_BACKEND
+    if (FLAGS_cpu == "any") {
+#if defined(XENIA_HAS_X64_BACKEND) && XENIA_HAS_X64_BACKEND
+      if (!backend) {
+        backend.reset(new xe::cpu::backend::x64::X64Backend());
+      }
+#endif  // XENIA_HAS_X64_BACKEND
+    }
+  }
+
   // Initialize the CPU.
   processor_ = std::make_unique<xe::cpu::Processor>(memory_.get(),
                                                     export_resolver_.get());
-  if (!processor_->Setup()) {
+  if (!processor_->Setup(std::move(backend))) {
     return X_STATUS_UNSUCCESSFUL;
   }
 
@@ -173,11 +191,13 @@ X_STATUS Emulator::Setup(
   // Initialize emulator fallback exception handling last.
   ExceptionHandler::Install(Emulator::ExceptionCallbackThunk, this);
 
-  // Finish initializing the display.
-  display_window_->loop()->PostSynchronous([this]() {
-    xe::ui::GraphicsContextLock context_lock(display_window_->context());
-    Profiler::set_window(display_window_);
-  });
+  if (display_window_) {
+    // Finish initializing the display.
+    display_window_->loop()->PostSynchronous([this]() {
+      xe::ui::GraphicsContextLock context_lock(display_window_->context());
+      Profiler::set_window(display_window_);
+    });
+  }
 
   return result;
 }
@@ -623,8 +643,8 @@ X_STATUS Emulator::CompleteLaunch(const std::wstring& path,
     return X_STATUS_UNSUCCESSFUL;
   }
 
-  on_launch();
   main_thread_ = main_xthread->thread();
+  on_launch();
 
   return X_STATUS_SUCCESS;
 }

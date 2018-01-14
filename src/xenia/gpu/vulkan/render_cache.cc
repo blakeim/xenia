@@ -16,6 +16,7 @@
 #include "xenia/base/memory.h"
 #include "xenia/base/profiling.h"
 #include "xenia/gpu/gpu_flags.h"
+#include "xenia/gpu/registers.h"
 #include "xenia/gpu/vulkan/vulkan_gpu_flags.h"
 
 namespace xe {
@@ -63,8 +64,7 @@ VkFormat DepthRenderTargetFormatToVkFormat(DepthRenderTargetFormat format) {
     case DepthRenderTargetFormat::kD24S8:
       return VK_FORMAT_D24_UNORM_S8_UINT;
     case DepthRenderTargetFormat::kD24FS8:
-      // TODO(benvanik): some way to emulate? resolve-time flag?
-      XELOGW("Unsupported EDRAM format kD24FS8 used");
+      // Vulkan doesn't support 24-bit floats, so just promote it to 32-bit
       return VK_FORMAT_D32_SFLOAT_S8_UINT;
     default:
       return VK_FORMAT_UNDEFINED;
@@ -223,7 +223,9 @@ CachedTileView::CachedTileView(ui::vulkan::VulkanDevice* device,
   image_view_info.format = image_info.format;
   // TODO(benvanik): manipulate? may not be able to when attached.
   image_view_info.components = {
-      VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_B,
+      VK_COMPONENT_SWIZZLE_R,
+      VK_COMPONENT_SWIZZLE_G,
+      VK_COMPONENT_SWIZZLE_B,
       VK_COMPONENT_SWIZZLE_A,
   };
   image_view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
@@ -236,16 +238,27 @@ CachedTileView::CachedTileView(ui::vulkan::VulkanDevice* device,
   err = vkCreateImageView(device_, &image_view_info, nullptr, &image_view);
   CheckResult(err, "vkCreateImageView");
 
+  // Create separate depth/stencil views.
+  if (key.color_or_depth == 0) {
+    image_view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    err = vkCreateImageView(device_, &image_view_info, nullptr,
+                            &image_view_depth);
+    CheckResult(err, "vkCreateImageView");
+
+    image_view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_STENCIL_BIT;
+    err = vkCreateImageView(device_, &image_view_info, nullptr,
+                            &image_view_stencil);
+    CheckResult(err, "vkCreateImageView");
+  }
+
   // TODO(benvanik): transition to general layout?
   VkImageMemoryBarrier image_barrier;
   image_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
   image_barrier.pNext = nullptr;
-  image_barrier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+  image_barrier.srcAccessMask = 0;
   image_barrier.dstAccessMask =
       key.color_or_depth ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
                          : VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-  image_barrier.dstAccessMask |=
-      VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
   image_barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
   image_barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
   image_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -260,8 +273,12 @@ CachedTileView::CachedTileView(ui::vulkan::VulkanDevice* device,
   image_barrier.subresourceRange.baseArrayLayer = 0;
   image_barrier.subresourceRange.layerCount = 1;
   vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                       VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0, 0, nullptr, 0,
-                       nullptr, 1, &image_barrier);
+                       key.color_or_depth
+                           ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                           : VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+                       0, 0, nullptr, 0, nullptr, 1, &image_barrier);
+
+  image_layout = image_barrier.newLayout;
 }
 
 CachedTileView::~CachedTileView() {
@@ -296,6 +313,7 @@ CachedFramebuffer::CachedFramebuffer(
   VkFramebufferCreateInfo framebuffer_info;
   framebuffer_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
   framebuffer_info.pNext = nullptr;
+  framebuffer_info.flags = 0;
   framebuffer_info.renderPass = render_pass;
   framebuffer_info.attachmentCount = image_view_count;
   framebuffer_info.pAttachments = image_views;
@@ -422,6 +440,9 @@ CachedRenderPass::CachedRenderPass(VkDevice device,
       DepthRenderTargetFormatToVkFormat(depth_config.format);
 
   // Single subpass that writes to our attachments.
+  // FIXME: "Multiple attachments that alias the same memory must not be used in
+  // a single subpass"
+  // TODO: Input attachment for depth/stencil reads?
   VkSubpassDescription subpass_info;
   subpass_info.flags = 0;
   subpass_info.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
@@ -493,7 +514,11 @@ bool CachedRenderPass::IsCompatible(
 
 RenderCache::RenderCache(RegisterFile* register_file,
                          ui::vulkan::VulkanDevice* device)
-    : register_file_(register_file), device_(device) {
+    : register_file_(register_file), device_(device) {}
+
+RenderCache::~RenderCache() { Shutdown(); }
+
+VkResult RenderCache::Initialize() {
   VkResult status = VK_SUCCESS;
 
   // Create the buffer we'll bind to our memory.
@@ -507,8 +532,11 @@ RenderCache::RenderCache(RegisterFile* register_file,
   buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
   buffer_info.queueFamilyIndexCount = 0;
   buffer_info.pQueueFamilyIndices = nullptr;
-  status = vkCreateBuffer(*device, &buffer_info, nullptr, &edram_buffer_);
+  status = vkCreateBuffer(*device_, &buffer_info, nullptr, &edram_buffer_);
   CheckResult(status, "vkCreateBuffer");
+  if (status != VK_SUCCESS) {
+    return status;
+  }
 
   // Query requirements for the buffer.
   // It should be 1:1.
@@ -518,19 +546,24 @@ RenderCache::RenderCache(RegisterFile* register_file,
 
   // Allocate EDRAM memory.
   // TODO(benvanik): do we need it host visible?
-  edram_memory_ = device->AllocateMemory(buffer_requirements);
+  edram_memory_ = device_->AllocateMemory(buffer_requirements);
   assert_not_null(edram_memory_);
+  if (!edram_memory_) {
+    return VK_ERROR_INITIALIZATION_FAILED;
+  }
 
   // Bind buffer to map our entire memory.
   status = vkBindBufferMemory(*device_, edram_buffer_, edram_memory_, 0);
   CheckResult(status, "vkBindBufferMemory");
+  if (status != VK_SUCCESS) {
+    return status;
+  }
 
   if (status == VK_SUCCESS) {
     // For debugging, upload a grid into the EDRAM buffer.
     uint32_t* gpu_data = nullptr;
     status = vkMapMemory(*device_, edram_memory_, 0, buffer_requirements.size,
                          0, reinterpret_cast<void**>(&gpu_data));
-    CheckResult(status, "vkMapMemory");
 
     if (status == VK_SUCCESS) {
       for (int i = 0; i < kEdramBufferCapacity / 4; i++) {
@@ -540,9 +573,11 @@ RenderCache::RenderCache(RegisterFile* register_file,
       vkUnmapMemory(*device_, edram_memory_);
     }
   }
+
+  return VK_SUCCESS;
 }
 
-RenderCache::~RenderCache() {
+void RenderCache::Shutdown() {
   // TODO(benvanik): wait for idle.
 
   // Dispose all render passes (and their framebuffers).
@@ -558,8 +593,14 @@ RenderCache::~RenderCache() {
   cached_tile_views_.clear();
 
   // Release underlying EDRAM memory.
-  vkDestroyBuffer(*device_, edram_buffer_, nullptr);
-  vkFreeMemory(*device_, edram_memory_, nullptr);
+  if (edram_buffer_) {
+    vkDestroyBuffer(*device_, edram_buffer_, nullptr);
+    edram_buffer_ = nullptr;
+  }
+  if (edram_memory_) {
+    vkFreeMemory(*device_, edram_memory_, nullptr);
+    edram_memory_ = nullptr;
+  }
 }
 
 bool RenderCache::dirty() const {
@@ -567,13 +608,14 @@ bool RenderCache::dirty() const {
   auto& cur_regs = shadow_registers_;
 
   bool dirty = false;
-  dirty |= cur_regs.rb_modecontrol != regs[XE_GPU_REG_RB_MODECONTROL].u32;
-  dirty |= cur_regs.rb_surface_info != regs[XE_GPU_REG_RB_SURFACE_INFO].u32;
-  dirty |= cur_regs.rb_color_info != regs[XE_GPU_REG_RB_COLOR_INFO].u32;
-  dirty |= cur_regs.rb_color1_info != regs[XE_GPU_REG_RB_COLOR1_INFO].u32;
-  dirty |= cur_regs.rb_color2_info != regs[XE_GPU_REG_RB_COLOR2_INFO].u32;
-  dirty |= cur_regs.rb_color3_info != regs[XE_GPU_REG_RB_COLOR3_INFO].u32;
-  dirty |= cur_regs.rb_depth_info != regs[XE_GPU_REG_RB_DEPTH_INFO].u32;
+  dirty |= cur_regs.rb_modecontrol.value != regs[XE_GPU_REG_RB_MODECONTROL].u32;
+  dirty |=
+      cur_regs.rb_surface_info.value != regs[XE_GPU_REG_RB_SURFACE_INFO].u32;
+  dirty |= cur_regs.rb_color_info.value != regs[XE_GPU_REG_RB_COLOR_INFO].u32;
+  dirty |= cur_regs.rb_color1_info.value != regs[XE_GPU_REG_RB_COLOR1_INFO].u32;
+  dirty |= cur_regs.rb_color2_info.value != regs[XE_GPU_REG_RB_COLOR2_INFO].u32;
+  dirty |= cur_regs.rb_color3_info.value != regs[XE_GPU_REG_RB_COLOR3_INFO].u32;
+  dirty |= cur_regs.rb_depth_info.value != regs[XE_GPU_REG_RB_DEPTH_INFO].u32;
   dirty |= cur_regs.pa_sc_window_scissor_tl !=
            regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL].u32;
   dirty |= cur_regs.pa_sc_window_scissor_br !=
@@ -597,13 +639,20 @@ const RenderState* RenderCache::BeginRenderPass(VkCommandBuffer command_buffer,
   CachedFramebuffer* framebuffer = nullptr;
   auto& regs = shadow_registers_;
   bool dirty = false;
-  dirty |= SetShadowRegister(&regs.rb_modecontrol, XE_GPU_REG_RB_MODECONTROL);
-  dirty |= SetShadowRegister(&regs.rb_surface_info, XE_GPU_REG_RB_SURFACE_INFO);
-  dirty |= SetShadowRegister(&regs.rb_color_info, XE_GPU_REG_RB_COLOR_INFO);
-  dirty |= SetShadowRegister(&regs.rb_color1_info, XE_GPU_REG_RB_COLOR1_INFO);
-  dirty |= SetShadowRegister(&regs.rb_color2_info, XE_GPU_REG_RB_COLOR2_INFO);
-  dirty |= SetShadowRegister(&regs.rb_color3_info, XE_GPU_REG_RB_COLOR3_INFO);
-  dirty |= SetShadowRegister(&regs.rb_depth_info, XE_GPU_REG_RB_DEPTH_INFO);
+  dirty |=
+      SetShadowRegister(&regs.rb_modecontrol.value, XE_GPU_REG_RB_MODECONTROL);
+  dirty |= SetShadowRegister(&regs.rb_surface_info.value,
+                             XE_GPU_REG_RB_SURFACE_INFO);
+  dirty |=
+      SetShadowRegister(&regs.rb_color_info.value, XE_GPU_REG_RB_COLOR_INFO);
+  dirty |=
+      SetShadowRegister(&regs.rb_color1_info.value, XE_GPU_REG_RB_COLOR1_INFO);
+  dirty |=
+      SetShadowRegister(&regs.rb_color2_info.value, XE_GPU_REG_RB_COLOR2_INFO);
+  dirty |=
+      SetShadowRegister(&regs.rb_color3_info.value, XE_GPU_REG_RB_COLOR3_INFO);
+  dirty |=
+      SetShadowRegister(&regs.rb_depth_info.value, XE_GPU_REG_RB_DEPTH_INFO);
   dirty |= SetShadowRegister(&regs.pa_sc_window_scissor_tl,
                              XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL);
   dirty |= SetShadowRegister(&regs.pa_sc_window_scissor_br,
@@ -696,13 +745,12 @@ bool RenderCache::ParseConfiguration(RenderConfiguration* config) {
 
   // RB_MODECONTROL
   // Rough mode control (color, color+depth, etc).
-  config->mode_control = static_cast<ModeControl>(regs.rb_modecontrol & 0x7);
+  config->mode_control = regs.rb_modecontrol.edram_mode;
 
   // RB_SURFACE_INFO
   // http://fossies.org/dox/MesaLib-10.3.5/fd2__gmem_8c_source.html
-  config->surface_pitch_px = regs.rb_surface_info & 0x3FFF;
-  config->surface_msaa =
-      static_cast<MsaaSamples>((regs.rb_surface_info >> 16) & 0x3);
+  config->surface_pitch_px = regs.rb_surface_info.surface_pitch;
+  config->surface_msaa = regs.rb_surface_info.msaa_samples;
 
   // TODO(benvanik): verify min/max so we don't go out of bounds.
   // TODO(benvanik): has to be a good way to get height.
@@ -721,14 +769,15 @@ bool RenderCache::ParseConfiguration(RenderConfiguration* config) {
 
   // Color attachment configuration.
   if (config->mode_control == ModeControl::kColorDepth) {
-    uint32_t color_info[4] = {
-        regs.rb_color_info, regs.rb_color1_info, regs.rb_color2_info,
+    reg::RB_COLOR_INFO color_info[4] = {
+        regs.rb_color_info,
+        regs.rb_color1_info,
+        regs.rb_color2_info,
         regs.rb_color3_info,
     };
     for (int i = 0; i < 4; ++i) {
-      config->color[i].edram_base = color_info[i] & 0xFFF;
-      config->color[i].format =
-          static_cast<ColorRenderTargetFormat>((color_info[i] >> 16) & 0xF);
+      config->color[i].edram_base = color_info[i].color_base;
+      config->color[i].format = color_info[i].color_format;
       // We don't support GAMMA formats, so switch them to what we do support.
       switch (config->color[i].format) {
         case ColorRenderTargetFormat::k_8_8_8_8_GAMMA:
@@ -740,11 +789,10 @@ bool RenderCache::ParseConfiguration(RenderConfiguration* config) {
         case ColorRenderTargetFormat::k_2_10_10_10_FLOAT_unknown:
           config->color[i].format = ColorRenderTargetFormat::k_2_10_10_10_FLOAT;
           break;
+        default:
+          // The rest are good
+          break;
       }
-
-      // Make sure all unknown bits are unset.
-      // RDR sets bit 0x00400000
-      // assert_zero(color_info[i] & ~0x000F0FFF);
     }
   } else {
     for (int i = 0; i < 4; ++i) {
@@ -757,12 +805,8 @@ bool RenderCache::ParseConfiguration(RenderConfiguration* config) {
   // Depth/stencil attachment configuration.
   if (config->mode_control == ModeControl::kColorDepth ||
       config->mode_control == ModeControl::kDepth) {
-    config->depth_stencil.edram_base = regs.rb_depth_info & 0xFFF;
-    config->depth_stencil.format =
-        static_cast<DepthRenderTargetFormat>((regs.rb_depth_info >> 16) & 0x1);
-
-    // Make sure all unknown bits are unset.
-    // assert_zero(regs.rb_depth_info & ~0x00010FFF);
+    config->depth_stencil.edram_base = regs.rb_depth_info.depth_base;
+    config->depth_stencil.format = regs.rb_depth_info.depth_format;
   } else {
     config->depth_stencil.edram_base = 0;
     config->depth_stencil.format = DepthRenderTargetFormat::kD24S8;
@@ -828,7 +872,7 @@ bool RenderCache::ConfigureRenderPass(VkCommandBuffer command_buffer,
       color_key.edram_format = static_cast<uint16_t>(config->color[i].format);
       target_color_attachments[i] =
           FindOrCreateTileView(command_buffer, color_key);
-      if (!target_color_attachments) {
+      if (!target_color_attachments[i]) {
         XELOGE("Failed to get tile view for color attachment");
         return false;
       }
@@ -870,6 +914,46 @@ bool RenderCache::ConfigureRenderPass(VkCommandBuffer command_buffer,
   *out_render_pass = render_pass;
   *out_framebuffer = framebuffer;
   return true;
+}
+
+CachedTileView* RenderCache::FindTileView(uint32_t base, uint32_t pitch,
+                                          MsaaSamples samples,
+                                          bool color_or_depth,
+                                          uint32_t format) {
+  uint32_t tile_width = samples == MsaaSamples::k4X ? 40 : 80;
+  uint32_t tile_height = samples != MsaaSamples::k1X ? 8 : 16;
+
+  if (color_or_depth) {
+    // Adjust similar formats for easier matching.
+    switch (static_cast<ColorRenderTargetFormat>(format)) {
+      case ColorRenderTargetFormat::k_8_8_8_8_GAMMA:
+        format = uint32_t(ColorRenderTargetFormat::k_8_8_8_8);
+        break;
+      case ColorRenderTargetFormat::k_2_10_10_10_unknown:
+        format = uint32_t(ColorRenderTargetFormat::k_2_10_10_10);
+        break;
+      case ColorRenderTargetFormat::k_2_10_10_10_FLOAT_unknown:
+        format = uint32_t(ColorRenderTargetFormat::k_2_10_10_10_FLOAT);
+        break;
+      default:
+        // Other types as-is.
+        break;
+    }
+  }
+
+  TileViewKey key;
+  key.tile_offset = base;
+  key.tile_width = xe::round_up(pitch, tile_width) / tile_width;
+  key.tile_height = 160;
+  key.color_or_depth = color_or_depth ? 1 : 0;
+  key.msaa_samples = 0;
+  key.edram_format = static_cast<uint16_t>(format);
+  auto view = FindTileView(key);
+  if (view) {
+    return view;
+  }
+
+  return nullptr;
 }
 
 CachedTileView* RenderCache::FindOrCreateTileView(
@@ -1093,6 +1177,9 @@ void RenderCache::BlitToImage(VkCommandBuffer command_buffer,
       case ColorRenderTargetFormat::k_2_10_10_10_FLOAT_unknown:
         format = uint32_t(ColorRenderTargetFormat::k_2_10_10_10_FLOAT);
         break;
+      default:
+        // Rest are OK
+        break;
     }
   }
 
@@ -1114,25 +1201,26 @@ void RenderCache::BlitToImage(VkCommandBuffer command_buffer,
   // Update the view with the latest contents.
   // UpdateTileView(command_buffer, tile_view, true, true);
 
-  // Transition the image into a transfer destination layout, if needed.
-  // TODO: Util function for this
+  // Put a barrier on the tile view.
   VkImageMemoryBarrier image_barrier;
   image_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
   image_barrier.pNext = nullptr;
   image_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
   image_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-  image_barrier.srcAccessMask = 0;
-  image_barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-  image_barrier.oldLayout = image_layout;
-  image_barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-  image_barrier.image = image;
+  image_barrier.srcAccessMask =
+      color_or_depth ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+                     : VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+  image_barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+  image_barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+  image_barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+  image_barrier.image = tile_view->image;
   image_barrier.subresourceRange = {0, 0, 1, 0, 1};
   image_barrier.subresourceRange.aspectMask =
       color_or_depth ? VK_IMAGE_ASPECT_COLOR_BIT
                      : VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
 
-  vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                       VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0, 0, nullptr, 0,
+  vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT,
+                       VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
                        nullptr, 1, &image_barrier);
 
   // If we overflow we'll lose the device here.
@@ -1175,11 +1263,13 @@ void RenderCache::BlitToImage(VkCommandBuffer command_buffer,
                       image, image_layout, 1, &image_resolve);
   }
 
-  // Transition the image back into its previous layout.
+  // Add another barrier on the tile view.
   image_barrier.srcAccessMask = image_barrier.dstAccessMask;
-  image_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+  image_barrier.dstAccessMask =
+      color_or_depth ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+                     : VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
   std::swap(image_barrier.oldLayout, image_barrier.newLayout);
-  vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+  vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
                        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0, 0, nullptr, 0,
                        nullptr, 1, &image_barrier);
 }
@@ -1202,6 +1292,9 @@ void RenderCache::ClearEDRAMColor(VkCommandBuffer command_buffer,
       break;
     case ColorRenderTargetFormat::k_2_10_10_10_FLOAT_unknown:
       format = ColorRenderTargetFormat::k_2_10_10_10_FLOAT;
+      break;
+    default:
+      // Rest are OK
       break;
   }
 

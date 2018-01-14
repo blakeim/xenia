@@ -33,11 +33,20 @@ using xe::ui::vulkan::CheckResult;
 #include "xenia/gpu/vulkan/shaders/bin/quad_list_geom.h"
 #include "xenia/gpu/vulkan/shaders/bin/rect_list_geom.h"
 
-PipelineCache::PipelineCache(
-    RegisterFile* register_file, ui::vulkan::VulkanDevice* device,
-    VkDescriptorSetLayout uniform_descriptor_set_layout,
-    VkDescriptorSetLayout texture_descriptor_set_layout)
+PipelineCache::PipelineCache(RegisterFile* register_file,
+                             ui::vulkan::VulkanDevice* device)
     : register_file_(register_file), device_(*device) {
+  // We can also use the GLSL translator with a Vulkan dialect.
+  shader_translator_.reset(new SpirvShaderTranslator());
+}
+
+PipelineCache::~PipelineCache() { Shutdown(); }
+
+VkResult PipelineCache::Initialize(
+    VkDescriptorSetLayout uniform_descriptor_set_layout,
+    VkDescriptorSetLayout texture_descriptor_set_layout) {
+  VkResult status;
+
   // Initialize the shared driver pipeline cache.
   // We'll likely want to serialize this and reuse it, if that proves to be
   // useful. If the shaders are expensive and this helps we could do it per
@@ -48,9 +57,11 @@ PipelineCache::PipelineCache(
   pipeline_cache_info.flags = 0;
   pipeline_cache_info.initialDataSize = 0;
   pipeline_cache_info.pInitialData = nullptr;
-  auto err = vkCreatePipelineCache(device_, &pipeline_cache_info, nullptr,
-                                   &pipeline_cache_);
-  CheckResult(err, "vkCreatePipelineCache");
+  status = vkCreatePipelineCache(device_, &pipeline_cache_info, nullptr,
+                                 &pipeline_cache_);
+  if (status != VK_SUCCESS) {
+    return status;
+  }
 
   // Descriptors used by the pipelines.
   // These are the only ones we can ever bind.
@@ -82,9 +93,11 @@ PipelineCache::PipelineCache(
   pipeline_layout_info.pushConstantRangeCount =
       static_cast<uint32_t>(xe::countof(push_constant_ranges));
   pipeline_layout_info.pPushConstantRanges = push_constant_ranges;
-  err = vkCreatePipelineLayout(*device, &pipeline_layout_info, nullptr,
-                               &pipeline_layout_);
-  CheckResult(err, "vkCreatePipelineLayout");
+  status = vkCreatePipelineLayout(device_, &pipeline_layout_info, nullptr,
+                                  &pipeline_layout_);
+  if (status != VK_SUCCESS) {
+    return status;
+  }
 
   // Initialize our shared geometry shaders.
   // These will be used as needed to emulate primitive types Vulkan doesn't
@@ -97,34 +110,48 @@ PipelineCache::PipelineCache(
       static_cast<uint32_t>(sizeof(line_quad_list_geom));
   shader_module_info.pCode =
       reinterpret_cast<const uint32_t*>(line_quad_list_geom);
-  err = vkCreateShaderModule(device_, &shader_module_info, nullptr,
-                             &geometry_shaders_.line_quad_list);
-  CheckResult(err, "vkCreateShaderModule");
+  status = vkCreateShaderModule(device_, &shader_module_info, nullptr,
+                                &geometry_shaders_.line_quad_list);
+  if (status != VK_SUCCESS) {
+    return status;
+  }
+
   shader_module_info.codeSize = static_cast<uint32_t>(sizeof(point_list_geom));
   shader_module_info.pCode = reinterpret_cast<const uint32_t*>(point_list_geom);
-  err = vkCreateShaderModule(device_, &shader_module_info, nullptr,
-                             &geometry_shaders_.point_list);
-  CheckResult(err, "vkCreateShaderModule");
+  status = vkCreateShaderModule(device_, &shader_module_info, nullptr,
+                                &geometry_shaders_.point_list);
+  if (status != VK_SUCCESS) {
+    return status;
+  }
+
   shader_module_info.codeSize = static_cast<uint32_t>(sizeof(quad_list_geom));
   shader_module_info.pCode = reinterpret_cast<const uint32_t*>(quad_list_geom);
-  err = vkCreateShaderModule(device_, &shader_module_info, nullptr,
-                             &geometry_shaders_.quad_list);
-  CheckResult(err, "vkCreateShaderModule");
+  status = vkCreateShaderModule(device_, &shader_module_info, nullptr,
+                                &geometry_shaders_.quad_list);
+  if (status != VK_SUCCESS) {
+    return status;
+  }
+
   shader_module_info.codeSize = static_cast<uint32_t>(sizeof(rect_list_geom));
   shader_module_info.pCode = reinterpret_cast<const uint32_t*>(rect_list_geom);
-  err = vkCreateShaderModule(device_, &shader_module_info, nullptr,
-                             &geometry_shaders_.rect_list);
-  CheckResult(err, "vkCreateShaderModule");
+  status = vkCreateShaderModule(device_, &shader_module_info, nullptr,
+                                &geometry_shaders_.rect_list);
+  if (status != VK_SUCCESS) {
+    return status;
+  }
+
   shader_module_info.codeSize = static_cast<uint32_t>(sizeof(dummy_frag));
   shader_module_info.pCode = reinterpret_cast<const uint32_t*>(dummy_frag);
-  err = vkCreateShaderModule(device_, &shader_module_info, nullptr,
-                             &dummy_pixel_shader_);
+  status = vkCreateShaderModule(device_, &shader_module_info, nullptr,
+                                &dummy_pixel_shader_);
+  if (status != VK_SUCCESS) {
+    return status;
+  }
 
-  // We can also use the GLSL translator with a Vulkan dialect.
-  shader_translator_.reset(new SpirvShaderTranslator());
+  return VK_SUCCESS;
 }
 
-PipelineCache::~PipelineCache() {
+void PipelineCache::Shutdown() {
   // Destroy all pipelines.
   for (auto it : cached_pipelines_) {
     vkDestroyPipeline(device_, it.second, nullptr);
@@ -132,14 +159,35 @@ PipelineCache::~PipelineCache() {
   cached_pipelines_.clear();
 
   // Destroy geometry shaders.
-  vkDestroyShaderModule(device_, geometry_shaders_.line_quad_list, nullptr);
-  vkDestroyShaderModule(device_, geometry_shaders_.point_list, nullptr);
-  vkDestroyShaderModule(device_, geometry_shaders_.quad_list, nullptr);
-  vkDestroyShaderModule(device_, geometry_shaders_.rect_list, nullptr);
-  vkDestroyShaderModule(device_, dummy_pixel_shader_, nullptr);
+  if (geometry_shaders_.line_quad_list) {
+    vkDestroyShaderModule(device_, geometry_shaders_.line_quad_list, nullptr);
+    geometry_shaders_.line_quad_list = nullptr;
+  }
+  if (geometry_shaders_.point_list) {
+    vkDestroyShaderModule(device_, geometry_shaders_.point_list, nullptr);
+    geometry_shaders_.point_list = nullptr;
+  }
+  if (geometry_shaders_.quad_list) {
+    vkDestroyShaderModule(device_, geometry_shaders_.quad_list, nullptr);
+    geometry_shaders_.quad_list = nullptr;
+  }
+  if (geometry_shaders_.rect_list) {
+    vkDestroyShaderModule(device_, geometry_shaders_.rect_list, nullptr);
+    geometry_shaders_.rect_list = nullptr;
+  }
+  if (dummy_pixel_shader_) {
+    vkDestroyShaderModule(device_, dummy_pixel_shader_, nullptr);
+    dummy_pixel_shader_ = nullptr;
+  }
 
-  vkDestroyPipelineLayout(device_, pipeline_layout_, nullptr);
-  vkDestroyPipelineCache(device_, pipeline_cache_, nullptr);
+  if (pipeline_layout_) {
+    vkDestroyPipelineLayout(device_, pipeline_layout_, nullptr);
+    pipeline_layout_ = nullptr;
+  }
+  if (pipeline_cache_) {
+    vkDestroyPipelineCache(device_, pipeline_cache_, nullptr);
+    pipeline_cache_ = nullptr;
+  }
 
   // Destroy all shaders.
   for (auto it : shader_map_) {
@@ -275,6 +323,7 @@ VkPipeline PipelineCache::GetPipeline(const RenderState* render_state,
                                           &pipeline_info, nullptr, &pipeline);
   if (result != VK_SUCCESS) {
     XELOGE("vkCreateGraphicsPipelines failed with code %d", result);
+    assert_always();
     return nullptr;
   }
 
@@ -333,20 +382,20 @@ void PipelineCache::DumpShaderDisasmNV(
   pipeline_cache_info.flags = 0;
   pipeline_cache_info.initialDataSize = 0;
   pipeline_cache_info.pInitialData = nullptr;
-  auto err = vkCreatePipelineCache(device_, &pipeline_cache_info, nullptr,
-                                   &dummy_pipeline_cache);
-  CheckResult(err, "vkCreatePipelineCache");
+  auto status = vkCreatePipelineCache(device_, &pipeline_cache_info, nullptr,
+                                      &dummy_pipeline_cache);
+  CheckResult(status, "vkCreatePipelineCache");
 
   // Create a pipeline on the dummy cache and dump it.
   VkPipeline dummy_pipeline;
-  err = vkCreateGraphicsPipelines(device_, dummy_pipeline_cache, 1,
-                                  &pipeline_info, nullptr, &dummy_pipeline);
+  status = vkCreateGraphicsPipelines(device_, dummy_pipeline_cache, 1,
+                                     &pipeline_info, nullptr, &dummy_pipeline);
 
   std::vector<uint8_t> pipeline_data;
   size_t data_size = 0;
-  err = vkGetPipelineCacheData(device_, dummy_pipeline_cache, &data_size,
-                               nullptr);
-  if (err == VK_SUCCESS) {
+  status = vkGetPipelineCacheData(device_, dummy_pipeline_cache, &data_size,
+                                  nullptr);
+  if (status == VK_SUCCESS) {
     pipeline_data.resize(data_size);
     vkGetPipelineCacheData(device_, dummy_pipeline_cache, &data_size,
                            pipeline_data.data());
@@ -422,7 +471,7 @@ VkShaderModule PipelineCache::GetGeometryShader(PrimitiveType primitive_type,
       return nullptr;
     case PrimitiveType::kPointList:
       return geometry_shaders_.point_list;
-    case PrimitiveType::kUnknown0x07:
+    case PrimitiveType::kTriangleWithWFlags:
       assert_always("Unknown geometry type");
       return nullptr;
     case PrimitiveType::kRectangleList:
@@ -433,6 +482,12 @@ VkShaderModule PipelineCache::GetGeometryShader(PrimitiveType primitive_type,
     case PrimitiveType::kQuadStrip:
       // TODO(benvanik): quad strip geometry shader.
       assert_always("Quad strips not implemented");
+      return nullptr;
+    case PrimitiveType::k2DCopyRectListV0:
+    case PrimitiveType::k2DCopyRectListV1:
+    case PrimitiveType::k2DCopyRectListV2:
+    case PrimitiveType::k2DCopyRectListV3:
+      // TODO(DrChat): Research this.
       return nullptr;
     default:
       assert_unhandled_case(primitive_type);
@@ -633,11 +688,19 @@ bool PipelineCache::SetDynamicState(VkCommandBuffer command_buffer,
     // Normal vertex shaders only, for now.
     // TODO(benvanik): transform feedback/memexport.
     // https://github.com/freedreno/freedreno/blob/master/includes/a2xx.xml.h
-    // 0 = normal
-    // 2 = point size
-    // 7 = memexport
+    // Draw calls skipped if they have unsupported export modes.
+    // 0 = positionOnly
+    // 1 = unused
+    // 2 = sprite
+    // 3 = edge
+    // 4 = kill
+    // 5 = spriteKill
+    // 6 = edgeKill
+    // 7 = multipass
     assert_true(program_cntl.vs_export_mode == 0 ||
-                program_cntl.vs_export_mode == 2);
+                program_cntl.vs_export_mode == 2 ||
+                program_cntl.vs_export_mode == 7);
+    assert_false(program_cntl.gen_index_vtx);
 
     SpirvPushConstants push_constants;
 
@@ -728,6 +791,22 @@ bool PipelineCache::SetShadowRegister(float* dest, uint32_t register_name) {
   return true;
 }
 
+bool PipelineCache::SetShadowRegisterArray(uint32_t* dest, uint32_t num,
+                                           uint32_t register_name) {
+  bool dirty = false;
+  for (uint32_t i = 0; i < num; i++) {
+    uint32_t value = register_file_->values[register_name + i].u32;
+    if (dest[i] == value) {
+      continue;
+    }
+
+    dest[i] = value;
+    dirty |= true;
+  }
+
+  return dirty;
+}
+
 PipelineCache::UpdateStatus PipelineCache::UpdateState(
     VulkanShader* vertex_shader, VulkanShader* pixel_shader,
     PrimitiveType primitive_type) {
@@ -747,6 +826,8 @@ PipelineCache::UpdateStatus PipelineCache::UpdateState(
   }
 
   UpdateStatus status;
+  status = UpdateRenderTargetState();
+  CHECK_UPDATE_STATUS(status, mismatch, "Unable to update render target state");
   status = UpdateShaderStages(vertex_shader, pixel_shader, primitive_type);
   CHECK_UPDATE_STATUS(status, mismatch, "Unable to update shader stages");
   status = UpdateVertexInputState(vertex_shader);
@@ -766,6 +847,45 @@ PipelineCache::UpdateStatus PipelineCache::UpdateState(
   CHECK_UPDATE_STATUS(status, mismatch, "Unable to update color blend state");
 
   return mismatch ? UpdateStatus::kMismatch : UpdateStatus::kCompatible;
+}
+
+PipelineCache::UpdateStatus PipelineCache::UpdateRenderTargetState() {
+  auto& regs = update_render_targets_regs_;
+  bool dirty = false;
+
+  // Check the render target formats
+  struct {
+    reg::RB_COLOR_INFO rb_color_info;
+    reg::RB_DEPTH_INFO rb_depth_info;
+    reg::RB_COLOR_INFO rb_color1_info;
+    reg::RB_COLOR_INFO rb_color2_info;
+    reg::RB_COLOR_INFO rb_color3_info;
+  }* cur_regs = reinterpret_cast<decltype(cur_regs)>(
+      &register_file_->values[XE_GPU_REG_RB_COLOR_INFO].u32);
+
+  dirty |=
+      regs.rb_color_info.color_format != cur_regs->rb_color_info.color_format;
+  dirty |=
+      regs.rb_depth_info.depth_format != cur_regs->rb_depth_info.depth_format;
+  dirty |=
+      regs.rb_color1_info.color_format != cur_regs->rb_color1_info.color_format;
+  dirty |=
+      regs.rb_color2_info.color_format != cur_regs->rb_color2_info.color_format;
+  dirty |=
+      regs.rb_color3_info.color_format != cur_regs->rb_color3_info.color_format;
+
+  // And copy the regs over.
+  regs.rb_color_info.color_format = cur_regs->rb_color_info.color_format;
+  regs.rb_depth_info.depth_format = cur_regs->rb_depth_info.depth_format;
+  regs.rb_color1_info.color_format = cur_regs->rb_color1_info.color_format;
+  regs.rb_color2_info.color_format = cur_regs->rb_color2_info.color_format;
+  regs.rb_color3_info.color_format = cur_regs->rb_color3_info.color_format;
+  XXH64_update(&hash_state_, &regs, sizeof(regs));
+  if (!dirty) {
+    return UpdateStatus::kCompatible;
+  }
+
+  return UpdateStatus::kMismatch;
 }
 
 PipelineCache::UpdateStatus PipelineCache::UpdateShaderStages(
@@ -897,6 +1017,8 @@ PipelineCache::UpdateStatus PipelineCache::UpdateVertexInputState(
       vertex_attrib_descr.format = VK_FORMAT_UNDEFINED;
       vertex_attrib_descr.offset = attrib.fetch_instr.attributes.offset * 4;
 
+      // TODO(DrChat): Some floating point formats have is_integer set. Input
+      // data is still floating point, does this mean we need to truncate?
       bool is_signed = attrib.fetch_instr.attributes.is_signed;
       bool is_integer = attrib.fetch_instr.attributes.is_integer;
       switch (attrib.fetch_instr.attributes.data_format) {
@@ -953,22 +1075,32 @@ PipelineCache::UpdateStatus PipelineCache::UpdateVertexInputState(
           vertex_attrib_descr.format = VK_FORMAT_R16G16B16A16_SFLOAT;
           break;
         case VertexFormat::k_32:
-          // FIXME: Is this a NORM format?
-          assert_true(is_integer);
-          vertex_attrib_descr.format =
-              is_signed ? VK_FORMAT_R32_SINT : VK_FORMAT_R32_UINT;
+          if (is_integer) {
+            vertex_attrib_descr.format =
+                is_signed ? VK_FORMAT_R32_SINT : VK_FORMAT_R32_UINT;
+          } else {
+            // No NORM format.
+            assert_always();
+          }
           break;
         case VertexFormat::k_32_32:
-          // FIXME: Is this a NORM format?
-          assert_true(is_integer);
-          vertex_attrib_descr.format =
-              is_signed ? VK_FORMAT_R32G32_SINT : VK_FORMAT_R32G32_UINT;
+          if (is_integer) {
+            vertex_attrib_descr.format =
+                is_signed ? VK_FORMAT_R32G32_SINT : VK_FORMAT_R32G32_UINT;
+          } else {
+            // No NORM format.
+            assert_always();
+          }
           break;
         case VertexFormat::k_32_32_32_32:
-          // FIXME: Is this a NORM format?
-          assert_true(is_integer);
-          vertex_attrib_descr.format =
-              is_signed ? VK_FORMAT_R32G32B32A32_SINT : VK_FORMAT_R32_UINT;
+          if (is_integer) {
+            vertex_attrib_descr.format = is_signed
+                                             ? VK_FORMAT_R32G32B32A32_SINT
+                                             : VK_FORMAT_R32G32B32A32_UINT;
+          } else {
+            // No NORM format.
+            assert_always();
+          }
           break;
         case VertexFormat::k_32_FLOAT:
           // assert_true(is_signed);
@@ -1052,7 +1184,7 @@ PipelineCache::UpdateStatus PipelineCache::UpdateInputAssemblyState(
       state_info.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST_WITH_ADJACENCY;
       break;
     default:
-    case PrimitiveType::kUnknown0x07:
+    case PrimitiveType::kTriangleWithWFlags:
       XELOGE("unsupported primitive type %d", primitive_type);
       assert_unhandled_case(primitive_type);
       return UpdateStatus::kError;
@@ -1074,6 +1206,7 @@ PipelineCache::UpdateStatus PipelineCache::UpdateInputAssemblyState(
   }
   // TODO(benvanik): no way to specify in Vulkan?
   assert_true(regs.multi_prim_ib_reset_index == 0xFFFF ||
+              regs.multi_prim_ib_reset_index == 0xFFFFFF ||
               regs.multi_prim_ib_reset_index == 0xFFFFFFFF);
   // glPrimitiveRestartIndex(regs.multi_prim_ib_reset_index);
 
@@ -1140,7 +1273,9 @@ PipelineCache::UpdateStatus PipelineCache::UpdateRasterizationState(
     // Vulkan only supports both matching.
     assert_true(front_poly_mode == back_poly_mode);
     static const VkPolygonMode kFillModes[3] = {
-        VK_POLYGON_MODE_POINT, VK_POLYGON_MODE_LINE, VK_POLYGON_MODE_FILL,
+        VK_POLYGON_MODE_POINT,
+        VK_POLYGON_MODE_LINE,
+        VK_POLYGON_MODE_FILL,
     };
     state_info.polygonMode = kFillModes[front_poly_mode];
   } else {

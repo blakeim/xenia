@@ -173,7 +173,7 @@ dword_result_t XamContentCreateEnumerator(dword_t user_index, dword_t device_id,
   }
 
   if (buffer_size_ptr) {
-    *buffer_size_ptr = (uint32_t)XCONTENT_DATA::kSize;
+    *buffer_size_ptr = (uint32_t)XCONTENT_DATA::kSize * max_count;
   }
 
   auto e =
@@ -262,6 +262,10 @@ dword_result_t XamContentCreateEx(dword_t user_index, lpstring_t root_name,
       break;
   }
 
+  // creation result
+  // 0 = ?
+  // 1 = created
+  // 2 = opened
   uint32_t disposition = create ? 1 : 2;
   if (disposition_ptr) {
     if (overlapped_ptr) {
@@ -279,8 +283,8 @@ dword_result_t XamContentCreateEx(dword_t user_index, lpstring_t root_name,
   }
 
   if (overlapped_ptr) {
-    kernel_state()->CompleteOverlappedImmediateEx(overlapped_ptr, result,
-                                                  disposition, 0);
+    kernel_state()->CompleteOverlappedImmediateEx(overlapped_ptr, result, 0,
+                                                  disposition);
     return X_ERROR_IO_PENDING;
   } else {
     return result;

@@ -15,8 +15,7 @@ Discussing illegal activities will get you banned. No warnings.
 
 Buildbot | Status
 -------- | ------
-[All](http://build.xenia.jp/waterfall) | [![Build status](http://build.xenia.jp/png?builder=auto-builds)](http://build.xenia.jp/waterfall)
-[Windows](https://ci.appveyor.com/project/benvanik/xenia/history) | [![Build status](https://ci.appveyor.com/api/projects/status/ftqiy86kdfawyx3a/branch/master?svg=true)](https://ci.appveyor.com/project/benvanik/xenia/)
+[Windows](https://ci.appveyor.com/project/benvanik/xenia/branch/master) | [![Build status](https://ci.appveyor.com/api/projects/status/ftqiy86kdfawyx3a/branch/master?svg=true)](https://ci.appveyor.com/project/benvanik/xenia/branch/master)
 [Linux](https://travis-ci.org/benvanik/xenia) | [![Build status](https://travis-ci.org/benvanik/xenia.svg)](https://travis-ci.org/benvanik/xenia)
 
 Some real games run. Most don't.
@@ -34,7 +33,7 @@ legally purchased devices and games and information made public on the internet
 
 ## Quickstart
 
-Windows 8.1+ with Python 2.7 and [Visual Studio 2015](https://www.visualstudio.com/downloads/download-visual-studio-vs) and the Windows SDKs installed:
+Windows 8.1+ with Python 2.7 and [Visual Studio 2015 or Visual Studio 2017](https://www.visualstudio.com/downloads/) and the Windows SDKs installed:
 
     > git clone https://github.com/benvanik/xenia.git
     > cd xenia
@@ -66,13 +65,13 @@ and be sure to run clang-format!
 
 ## Contributors Wanted!
 
-**Before contributing code or issues be sure to read [CONTRIBUTING.md](CONTRIBUTING.md).**
+**Before contributing code or issues be sure to read [CONTRIBUTING.md](.github/CONTRIBUTING.md).**
 
 Have some spare time, know advanced C++, and want to write an emulator?
 Contribute! There's a ton of work that needs to be done, a lot of which
 is wide open greenfield fun.
 
-For general rules and guidelines please see [CONTRIBUTING.md](CONTRIBUTING.md).
+For general rules and guidelines please see [CONTRIBUTING.md](.github/CONTRIBUTING.md).
 
 Fixes and optimizations are always welcome (please!), but in addition to
 that there are some major work areas still untouched:
@@ -81,7 +80,7 @@ that there are some major work areas still untouched:
 * Add input drivers for [PS4 controllers](https://github.com/benvanik/xenia/issues/60) (or anything else)
 * Skilled with Linux? A strong contributor is needed to [help with porting](https://github.com/benvanik/xenia/labels/cross%20platform)
 
-See more projects [good for contributors](https://github.com/benvanik/xenia/issues?labels=good+for+contributors&page=1&state=open). It's a good idea to ask on IRC/the bugs before beginning work
+See more projects [good for contributors](https://github.com/benvanik/xenia/labels/good%20first%20issue). It's a good idea to ask on IRC/the bugs before beginning work
 on something.
 
 ## FAQ
@@ -90,5 +89,5 @@ For more see the main [frequently asked questions](http://xenia.jp/faq/) page.
 
 ### Can I get an exe?
 
-Check the [Releases](https://github.com/benvanik/xenia/releases) tab to see
-what's there. Updated irregularly.
+Check [Appveyor's artifacts](https://ci.appveyor.com/project/benvanik/xenia/build/artifacts) to see
+what's there.

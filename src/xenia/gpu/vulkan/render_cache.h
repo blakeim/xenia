@@ -11,6 +11,7 @@
 #define XENIA_GPU_VULKAN_RENDER_CACHE_H_
 
 #include "xenia/gpu/register_file.h"
+#include "xenia/gpu/registers.h"
 #include "xenia/gpu/shader.h"
 #include "xenia/gpu/texture_info.h"
 #include "xenia/gpu/vulkan/vulkan_shader.h"
@@ -55,10 +56,17 @@ class CachedTileView {
   VkImage image = nullptr;
   // Simple view on the image matching the format.
   VkImageView image_view = nullptr;
+  // Image layout
+  VkImageLayout image_layout = VK_IMAGE_LAYOUT_UNDEFINED;
   // Memory buffer
   VkDeviceMemory memory = nullptr;
   // Image sample count
   VkSampleCountFlagBits sample_count = VK_SAMPLE_COUNT_1_BIT;
+
+  // (if a depth view) Image view of depth aspect
+  VkImageView image_view_depth = nullptr;
+  // (if a depth view) Image view of stencil aspect
+  VkImageView image_view_stencil = nullptr;
 
   CachedTileView(ui::vulkan::VulkanDevice* device,
                  VkCommandBuffer command_buffer, VkDeviceMemory edram_memory,
@@ -73,6 +81,10 @@ class CachedTileView {
 
   bool operator<(const CachedTileView& other) const {
     return key.tile_offset < other.key.tile_offset;
+  }
+
+  VkExtent2D GetSize() const {
+    return {key.tile_width * 80u, key.tile_height * 16u};
   }
 
  private:
@@ -264,9 +276,16 @@ class RenderCache {
   RenderCache(RegisterFile* register_file, ui::vulkan::VulkanDevice* device);
   ~RenderCache();
 
+  VkResult Initialize();
+  void Shutdown();
+
   // Call this to determine if you should start a new render pass or continue
   // with an already open pass.
   bool dirty() const;
+
+  CachedTileView* FindTileView(uint32_t base, uint32_t pitch,
+                               MsaaSamples samples, bool color_or_depth,
+                               uint32_t format);
 
   // Begins a render pass targeting the state-specified framebuffer formats.
   // The command buffer will be transitioned into the render pass phase.
@@ -353,13 +372,13 @@ class RenderCache {
   // If the registers don't change between passes we can quickly reuse the
   // previous one.
   struct ShadowRegisters {
-    uint32_t rb_modecontrol;
-    uint32_t rb_surface_info;
-    uint32_t rb_color_info;
-    uint32_t rb_color1_info;
-    uint32_t rb_color2_info;
-    uint32_t rb_color3_info;
-    uint32_t rb_depth_info;
+    reg::RB_MODECONTROL rb_modecontrol;
+    reg::RB_SURFACE_INFO rb_surface_info;
+    reg::RB_COLOR_INFO rb_color_info;
+    reg::RB_COLOR_INFO rb_color1_info;
+    reg::RB_COLOR_INFO rb_color2_info;
+    reg::RB_COLOR_INFO rb_color3_info;
+    reg::RB_DEPTH_INFO rb_depth_info;
     uint32_t pa_sc_window_scissor_tl;
     uint32_t pa_sc_window_scissor_br;
 

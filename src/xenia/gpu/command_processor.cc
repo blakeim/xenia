@@ -10,6 +10,7 @@
 #include "xenia/gpu/command_processor.h"
 
 #include <algorithm>
+#include <cmath>
 
 #include "xenia/base/byte_stream.h"
 #include "xenia/base/logging.h"
@@ -116,7 +117,7 @@ void CommandProcessor::ClearCaches() {}
 void CommandProcessor::WorkerThreadMain() {
   context_->MakeCurrent();
   if (!SetupContext()) {
-    xe::FatalError("Unable to setup command processor GL state");
+    xe::FatalError("Unable to setup command processor internal state");
     return;
   }
 
@@ -228,6 +229,7 @@ bool CommandProcessor::SetupContext() { return true; }
 void CommandProcessor::ShutdownContext() { context_.reset(); }
 
 void CommandProcessor::InitializeRingBuffer(uint32_t ptr, uint32_t log2_size) {
+  read_ptr_index_ = 0;
   primary_buffer_ptr_ = ptr;
   primary_buffer_size_ = uint32_t(std::pow(2u, log2_size));
 }
@@ -336,7 +338,7 @@ void CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
     }
   } else {
     // Spin until no more pending swap.
-    while (true) {
+    while (worker_running_) {
       {
         std::lock_guard<std::mutex> lock(swap_state_.mutex);
         if (!swap_state_.pending) {
@@ -370,8 +372,7 @@ uint32_t CommandProcessor::ExecutePrimaryBuffer(uint32_t read_index,
     uint32_t title_id = kernel_state_->GetExecutableModule()
                             ? kernel_state_->GetExecutableModule()->title_id()
                             : 0;
-    auto file_name =
-        xe::format_string(L"title_%8X_stream.xenia_gpu_trace", title_id);
+    auto file_name = xe::format_string(L"%8X_stream.xtr", title_id);
     auto path = trace_stream_path_ + file_name;
     trace_writer_.Open(path, title_id);
   }
@@ -466,12 +467,13 @@ bool CommandProcessor::ExecutePacketType0(RingBuffer* reader, uint32_t packet) {
   // (base_index << 2).
 
   uint32_t count = ((packet >> 16) & 0x3FFF) + 1;
-  trace_writer_.WritePacketStart(uint32_t(reader->read_ptr() - 4), 1 + count);
   if (reader->read_count() < count * sizeof(uint32_t)) {
     XELOGE("ExecutePacketType0 overflow (read count %.8X, packet count %.8X)",
            reader->read_count(), count * sizeof(uint32_t));
     return false;
   }
+
+  trace_writer_.WritePacketStart(uint32_t(reader->read_ptr() - 4), 1 + count);
 
   uint32_t base_index = (packet & 0x7FFF);
   uint32_t write_one_reg = (packet >> 15) & 0x1;
@@ -660,6 +662,24 @@ bool CommandProcessor::ExecutePacketType3(RingBuffer* reader, uint32_t packet) {
   }
 
   trace_writer_.WritePacketEnd();
+  if (opcode == PM4_XE_SWAP) {
+    // End the trace writer frame.
+    if (trace_writer_.is_open()) {
+      trace_writer_.WriteEvent(EventCommand::Type::kSwap);
+      trace_writer_.Flush();
+      if (trace_state_ == TraceState::kSingleFrame) {
+        trace_state_ = TraceState::kDisabled;
+        trace_writer_.Close();
+      }
+    } else if (trace_state_ == TraceState::kSingleFrame) {
+      // New trace request - we only start tracing at the beginning of a frame.
+      uint32_t title_id = kernel_state_->GetExecutableModule()->title_id();
+      auto file_name = xe::format_string(L"%8X_%u.xtr", title_id, counter_ - 1);
+      auto path = trace_frame_path_ + file_name;
+      trace_writer_.Open(path, title_id);
+    }
+  }
+
   assert_true(reader->read_offset() ==
               (data_start_offset + (count * sizeof(uint32_t))) %
                   reader->capacity());
@@ -723,21 +743,6 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(RingBuffer* reader,
     IssueSwap(frontbuffer_ptr, frontbuffer_width, frontbuffer_height);
   }
 
-  if (trace_writer_.is_open()) {
-    trace_writer_.WriteEvent(EventCommand::Type::kSwap);
-    trace_writer_.Flush();
-    if (trace_state_ == TraceState::kSingleFrame) {
-      trace_state_ = TraceState::kDisabled;
-      trace_writer_.Close();
-    }
-  } else if (trace_state_ == TraceState::kSingleFrame) {
-    // New trace request - we only start tracing at the beginning of a frame.
-    uint32_t title_id = kernel_state_->GetExecutableModule()->title_id();
-    auto file_name = xe::format_string(L"title_%8X_frame_%u.xenia_gpu_trace",
-                                       title_id, counter_);
-    auto path = trace_frame_path_ + file_name;
-    trace_writer_.Open(path, title_id);
-  }
   ++counter_;
   return true;
 }
@@ -822,11 +827,17 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(RingBuffer* reader,
         }
         xe::threading::SyncMemory();
         ReturnFromWait();
+
+        if (!worker_running_) {
+          // Short-circuited exit.
+          return false;
+        }
       } else {
         xe::threading::MaybeYield();
       }
     }
   } while (!matched);
+
   return true;
 }
 

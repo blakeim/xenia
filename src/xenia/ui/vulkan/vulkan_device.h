@@ -70,10 +70,10 @@ class VulkanDevice {
   // returns null the primary_queue should be used with the
   // primary_queue_mutex.
   // This method is thread safe.
-  VkQueue AcquireQueue();
+  VkQueue AcquireQueue(uint32_t queue_family_index);
   // Releases a queue back to the device pool.
   // This method is thread safe.
-  void ReleaseQueue(VkQueue queue);
+  void ReleaseQueue(VkQueue queue, uint32_t queue_family_index);
 
   static void DbgSetObjectName(VkDevice device, uint64_t object,
                                VkDebugReportObjectTypeEXT object_type,
@@ -100,12 +100,15 @@ class VulkanDevice {
 
   std::vector<Requirement> required_layers_;
   std::vector<Requirement> required_extensions_;
+  std::vector<const char*> enabled_extensions_;
+
+  bool debug_marker_ena_ = false;
 
   DeviceInfo device_info_;
   uint32_t queue_family_index_ = 0;
   std::mutex queue_mutex_;
   VkQueue primary_queue_ = nullptr;
-  std::vector<VkQueue> free_queues_;
+  std::vector<std::vector<VkQueue>> free_queues_;
 };
 
 }  // namespace vulkan

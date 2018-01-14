@@ -210,7 +210,7 @@ class PrimitivePointerParam : public ParamBase<uint32_t> {
     return reinterpret_cast<uintptr_t>(host_ptr_);
   }
   T value() const { return *host_ptr_; }
-  operator T() const { return *host_ptr_; }
+  operator T() const = delete;
   operator xe::be<T>*() const { return host_ptr_; }
   operator bool() const { return host_ptr_ != nullptr; }
   void Zero() const {
@@ -450,9 +450,11 @@ void PrintKernelCall(cpu::Export* export_entry, const Tuple& params) {
   AppendKernelCallParams(string_buffer, export_entry, params);
   string_buffer.Append(')');
   if (export_entry->tags & xe::cpu::ExportTag::kImportant) {
-    xe::LogLine('i', string_buffer.GetString(), string_buffer.length());
+    xe::LogLine(xe::LogLevel::LOG_LEVEL_INFO, 'i', string_buffer.GetString(),
+                string_buffer.length());
   } else {
-    xe::LogLine('d', string_buffer.GetString(), string_buffer.length());
+    xe::LogLine(xe::LogLevel::LOG_LEVEL_DEBUG, 'd', string_buffer.GetString(),
+                string_buffer.length());
   }
 }
 
@@ -472,7 +474,9 @@ xe::cpu::Export* RegisterExport(R (*fn)(Ps&...), const char* name,
     static void Trampoline(PPCContext* ppc_context) {
       ++export_entry->function_data.call_count;
       Param::Init init = {
-          ppc_context, sizeof...(Ps), 0,
+          ppc_context,
+          sizeof...(Ps),
+          0,
       };
       auto params = std::make_tuple<Ps...>(Ps(init)...);
       if (export_entry->tags & xe::cpu::ExportTag::kLog &&
@@ -505,7 +509,8 @@ xe::cpu::Export* RegisterExport(void (*fn)(Ps&...), const char* name,
     static void Trampoline(PPCContext* ppc_context) {
       ++export_entry->function_data.call_count;
       Param::Init init = {
-          ppc_context, sizeof...(Ps),
+          ppc_context,
+          sizeof...(Ps),
       };
       auto params = std::make_tuple<Ps...>(Ps(init)...);
       if (export_entry->tags & xe::cpu::ExportTag::kLog &&

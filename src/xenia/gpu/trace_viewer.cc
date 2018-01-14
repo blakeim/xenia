@@ -71,7 +71,7 @@ int TraceViewer::Main(const std::vector<std::wstring>& args) {
     file_picker->set_multi_selection(false);
     file_picker->set_title(L"Select Trace File");
     file_picker->set_extensions({
-        {L"Supported Files", L"*.xenia_gpu_trace"},
+        {L"Supported Files", L"*.xtr"},
         {L"All Files (*.*)", L"*.*"},
     });
     if (file_picker->Show()) {
@@ -404,7 +404,7 @@ int TraceViewer::RecursiveDrawCommandBufferUI(
         }
 
         ImGui::PushID(int(i));
-        if (ImGui::TreeNode((void*)0, "Indirect Buffer %d", i)) {
+        if (ImGui::TreeNode((void*)0, "Indirect Buffer %" PRIu64, i)) {
           ImGui::Indent();
           auto id = RecursiveDrawCommandBufferUI(
               frame, buffer->commands[i].command_subtree.get());
@@ -673,20 +673,21 @@ void TraceViewer::DrawTextureInfo(
     return;
   }
   auto texture = GetTextureEntry(texture_info, sampler_info);
-  if (!texture) {
-    DrawFailedTextureInfo(texture_binding, "Failed to demand texture");
-    return;
-  }
 
   ImGui::Columns(2);
-  ImVec2 button_size(256, 256);
-  if (ImGui::ImageButton(ImTextureID(texture), button_size, ImVec2(0, 0),
-                         ImVec2(1, 1))) {
-    // show viewer
+  if (texture) {
+    ImVec2 button_size(256, 256);
+    if (ImGui::ImageButton(ImTextureID(texture), button_size, ImVec2(0, 0),
+                           ImVec2(1, 1))) {
+      // show viewer
+    }
+  } else {
+    DrawFailedTextureInfo(texture_binding, "Failed to demand texture");
   }
   ImGui::NextColumn();
   ImGui::Text("Fetch Slot: %u", texture_binding.fetch_constant);
   ImGui::Text("Guest Address: %.8X", texture_info.guest_address);
+  ImGui::Text("Format: %s", texture_info.format_info()->name);
   switch (texture_info.dimension) {
     case Dimension::k1D:
       ImGui::Text("1D: %dpx", texture_info.width + 1);
@@ -949,9 +950,8 @@ void TraceViewer::DrawVertexFetcher(Shader* shader,
     }
   }
   ImGui::Columns(1);
-  ImGui::SetCursorPosY(ImGui::GetCursorPosY() +
-                       (vertex_count - display_end) *
-                           ImGui::GetTextLineHeight());
+  ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (vertex_count - display_end) *
+                                                    ImGui::GetTextLineHeight());
   ImGui::PopStyleVar();
   ImGui::EndChild();
 }
@@ -970,10 +970,14 @@ static const char* kStencilFuncNames[] = {
     "Decrement and Clamp",
 };
 static const char* kIndexFormatNames[] = {
-    "uint16", "uint32",
+    "uint16",
+    "uint32",
 };
 static const char* kEndiannessNames[] = {
-    "unspecified endianness", "8-in-16", "8-in-32", "16-in-32",
+    "unspecified endianness",
+    "8-in-16",
+    "8-in-32",
+    "16-in-32",
 };
 static const char* kColorFormatNames[] = {
     /* 0  */ "k_8_8_8_8",
@@ -994,7 +998,8 @@ static const char* kColorFormatNames[] = {
     /* 15 */ "k_32_32_FLOAT",
 };
 static const char* kDepthFormatNames[] = {
-    "kD24S8", "kD24FS8",
+    "kD24S8",
+    "kD24FS8",
 };
 
 void ProgressBar(float frac, float width, float height = 0,
@@ -1184,7 +1189,9 @@ void TraceViewer::DrawStateUI() {
     uint32_t surface_pitch = surface_info & 0x3FFF;
     auto surface_msaa = (surface_info >> 16) & 0x3;
     static const char* kMsaaNames[] = {
-        "1X", "2X", "4X",
+        "1X",
+        "2X",
+        "4X",
     };
     ImGui::BulletText("Surface Pitch: %d", surface_pitch);
     ImGui::BulletText("Surface HI-Z Pitch: %d", surface_hiz);
@@ -1269,7 +1276,9 @@ void TraceViewer::DrawStateUI() {
       ImGui::BulletText("Front-face: counter-clockwise");
     }
     static const char* kFillModeNames[3] = {
-        "point", "line", "fill",
+        "point",
+        "line",
+        "fill",
     };
     bool poly_mode = ((pa_su_sc_mode_cntl >> 3) & 0x3) != 0;
     if (poly_mode) {
@@ -1563,7 +1572,7 @@ void TraceViewer::DrawStateUI() {
       vertices.resize(size / 4);
       QueryVSOutput(vertices.data(), size);
 
-      ImGui::Text("%d output vertices", vertices.size() / 4);
+      ImGui::Text("%" PRIu64 " output vertices", vertices.size() / 4);
       ImGui::SameLine();
       static bool normalize = false;
       ImGui::Checkbox("Normalize", &normalize);

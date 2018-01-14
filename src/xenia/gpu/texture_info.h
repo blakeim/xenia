@@ -34,7 +34,7 @@ enum class TextureFormat : uint32_t {
   k_8_8 = 10,
   k_Cr_Y1_Cb_Y0 = 11,
   k_Y1_Cr_Y0_Cb = 12,
-  // ? hole
+  k_Shadow = 13,
   k_8_8_8_8_A = 14,
   k_4_4_4_4 = 15,
   k_10_11_11 = 16,
@@ -42,7 +42,7 @@ enum class TextureFormat : uint32_t {
   k_DXT1 = 18,
   k_DXT2_3 = 19,
   k_DXT4_5 = 20,
-  // ? hole
+  k_DXV = 21,
   k_24_8 = 22,
   k_24_8_FLOAT = 23,
   k_16 = 24,
@@ -87,6 +87,38 @@ enum class TextureFormat : uint32_t {
 
   kUnknown = 0xFFFFFFFFu,
 };
+
+inline TextureFormat GetBaseFormat(TextureFormat texture_format) {
+  // These formats are used for resampling textures / gamma control.
+  switch (texture_format) {
+    case TextureFormat::k_16_EXPAND:
+      return TextureFormat::k_16_FLOAT;
+    case TextureFormat::k_16_16_EXPAND:
+      return TextureFormat::k_16_16_FLOAT;
+    case TextureFormat::k_16_16_16_16_EXPAND:
+      return TextureFormat::k_16_16_16_16_FLOAT;
+    case TextureFormat::k_8_8_8_8_AS_16_16_16_16:
+      return TextureFormat::k_8_8_8_8;
+    case TextureFormat::k_DXT1_AS_16_16_16_16:
+      return TextureFormat::k_DXT1;
+    case TextureFormat::k_DXT2_3_AS_16_16_16_16:
+      return TextureFormat::k_DXT2_3;
+    case TextureFormat::k_DXT4_5_AS_16_16_16_16:
+      return TextureFormat::k_DXT4_5;
+    case TextureFormat::k_2_10_10_10_AS_16_16_16_16:
+      return TextureFormat::k_2_10_10_10;
+    case TextureFormat::k_10_11_11_AS_16_16_16_16:
+      return TextureFormat::k_10_11_11;
+    case TextureFormat::k_11_11_10_AS_16_16_16_16:
+      return TextureFormat::k_11_11_10;
+    case TextureFormat::k_DXT3A_AS_1_1_1_1:
+      return TextureFormat::k_DXT3A;
+    default:
+      break;
+  }
+
+  return texture_format;
+}
 
 inline size_t GetTexelSize(TextureFormat format) {
   switch (format) {
@@ -205,6 +237,7 @@ enum class FormatType {
 
 struct FormatInfo {
   TextureFormat format;
+  const char* name;
   FormatType type;
   uint32_t block_width;
   uint32_t block_height;
@@ -215,63 +248,63 @@ struct FormatInfo {
 
 struct TextureInfo {
   uint32_t guest_address;
+  TextureFormat texture_format;
   Dimension dimension;
   uint32_t width;
   uint32_t height;
   uint32_t depth;
-  const FormatInfo* format_info;
   Endian endianness;
   bool is_tiled;
+  bool has_packed_mips;
   uint32_t input_length;
-  uint32_t output_length;
+
+  const FormatInfo* format_info() const {
+    return FormatInfo::Get(static_cast<uint32_t>(texture_format));
+  }
 
   bool is_compressed() const {
-    return format_info->type == FormatType::kCompressed;
+    return format_info()->type == FormatType::kCompressed;
   }
 
   union {
     struct {
       uint32_t logical_width;
-      uint32_t block_width;
-      uint32_t input_width;
-      uint32_t input_pitch;
-      uint32_t output_width;
-      uint32_t output_pitch;
+      uint32_t block_width;  // # of horizontal blocks
+      uint32_t input_width;  // texel pitch
+      uint32_t input_pitch;  // byte pitch
     } size_1d;
     struct {
       uint32_t logical_width;
       uint32_t logical_height;
-      uint32_t block_width;
-      uint32_t block_height;
-      uint32_t input_width;
-      uint32_t input_height;
-      uint32_t input_pitch;
-      uint32_t output_width;
-      uint32_t output_height;
-      uint32_t output_pitch;
+      uint32_t block_width;   // # of horizontal blocks
+      uint32_t block_height;  // # of vertical blocks
+      uint32_t input_width;   // texel pitch
+      uint32_t input_height;  // texel height
+      uint32_t input_pitch;   // byte pitch
     } size_2d;
     struct {
     } size_3d;
     struct {
       uint32_t logical_width;
       uint32_t logical_height;
-      uint32_t block_width;
-      uint32_t block_height;
-      uint32_t input_width;
-      uint32_t input_height;
-      uint32_t input_pitch;
-      uint32_t output_width;
-      uint32_t output_height;
-      uint32_t output_pitch;
-      uint32_t input_face_length;
-      uint32_t output_face_length;
+      uint32_t block_width;        // # of horizontal blocks
+      uint32_t block_height;       // # of vertical blocks
+      uint32_t input_width;        // texel pitch
+      uint32_t input_height;       // texel height
+      uint32_t input_pitch;        // byte pitch
+      uint32_t input_face_length;  // byte pitch of face
     } size_cube;
   };
 
   static bool Prepare(const xenos::xe_gpu_texture_fetch_t& fetch,
                       TextureInfo* out_info);
 
-  static void GetPackedTileOffset(const TextureInfo& texture_info,
+  static bool PrepareResolve(uint32_t physical_address,
+                             TextureFormat texture_format, Endian endian,
+                             uint32_t width, uint32_t height,
+                             TextureInfo* out_info);
+
+  static bool GetPackedTileOffset(const TextureInfo& texture_info,
                                   uint32_t* out_offset_x,
                                   uint32_t* out_offset_y);
   static uint32_t TiledOffset2DOuter(uint32_t y, uint32_t width,
@@ -285,9 +318,9 @@ struct TextureInfo {
   }
 
  private:
-  void CalculateTextureSizes1D(const xenos::xe_gpu_texture_fetch_t& fetch);
-  void CalculateTextureSizes2D(const xenos::xe_gpu_texture_fetch_t& fetch);
-  void CalculateTextureSizesCube(const xenos::xe_gpu_texture_fetch_t& fetch);
+  void CalculateTextureSizes2D(uint32_t width, uint32_t height);
+  void CalculateTextureSizesCube(uint32_t width, uint32_t height,
+                                 uint32_t depth);
 };
 
 }  // namespace gpu

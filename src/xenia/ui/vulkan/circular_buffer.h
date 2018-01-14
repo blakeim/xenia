@@ -43,8 +43,8 @@ class CircularBuffer {
     VkFence fence;
   };
 
-  bool Initialize(VkDeviceMemory memory, VkDeviceSize offset);
-  bool Initialize();
+  VkResult Initialize(VkDeviceMemory memory, VkDeviceSize offset);
+  VkResult Initialize();
   void Shutdown();
 
   void GetBufferMemoryRequirements(VkMemoryRequirements* reqs);
@@ -61,6 +61,7 @@ class CircularBuffer {
   // reaches the signaled state.
   Allocation* Acquire(VkDeviceSize length, VkFence fence);
   void Flush(Allocation* allocation);
+  void Flush(VkDeviceSize offset, VkDeviceSize length);
 
   // Clears all allocations, regardless of whether they've been consumed or not.
   void Clear();

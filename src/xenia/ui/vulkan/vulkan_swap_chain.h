@@ -11,6 +11,7 @@
 #define XENIA_UI_VULKAN_VULKAN_SWAP_CHAIN_H_
 
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -47,28 +48,29 @@ class VulkanSwapChain {
   VkCommandBuffer copy_cmd_buffer() const { return copy_cmd_buffer_; }
 
   // Initializes the swap chain with the given WSI surface.
-  bool Initialize(VkSurfaceKHR surface);
+  VkResult Initialize(VkSurfaceKHR surface);
   // Reinitializes the swap chain with the initial surface.
   // The surface will be retained but all other swap chain resources will be
   // torn down and recreated with the new surface properties (size/etc).
-  bool Reinitialize();
+  VkResult Reinitialize();
 
   // Waits on and signals a semaphore in this operation.
   void WaitAndSignalSemaphore(VkSemaphore sem);
 
   // Begins the swap operation, preparing state for rendering.
-  bool Begin();
+  VkResult Begin();
   // Ends the swap operation, finalizing rendering and presenting the results.
-  bool End();
+  VkResult End();
 
  private:
   struct Buffer {
     VkImage image = nullptr;
+    VkImageLayout image_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     VkImageView image_view = nullptr;
     VkFramebuffer framebuffer = nullptr;
   };
 
-  bool InitializeBuffer(Buffer* buffer, VkImage target_image);
+  VkResult InitializeBuffer(Buffer* buffer, VkImage target_image);
   void DestroyBuffer(Buffer* buffer);
 
   // Safely releases all swap chain resources.
@@ -77,11 +79,16 @@ class VulkanSwapChain {
   VulkanInstance* instance_ = nullptr;
   VulkanDevice* device_ = nullptr;
 
+  VkFence synchronization_fence_ = nullptr;
+  VkQueue presentation_queue_ = nullptr;
+  std::mutex* presentation_queue_mutex_ = nullptr;
+  uint32_t presentation_queue_family_ = -1;
   VkSurfaceKHR surface_ = nullptr;
   uint32_t surface_width_ = 0;
   uint32_t surface_height_ = 0;
   VkFormat surface_format_ = VK_FORMAT_UNDEFINED;
   VkCommandPool cmd_pool_ = nullptr;
+  VkCommandBuffer cmd_buffer_ = nullptr;
   VkCommandBuffer copy_cmd_buffer_ = nullptr;
   VkCommandBuffer render_cmd_buffer_ = nullptr;
   VkRenderPass render_pass_ = nullptr;
